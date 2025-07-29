@@ -4,6 +4,9 @@
 DreemLearning is a sleep-staging library to reproduce the results from CITER PAPIER. It can also easily be extended to handle new datasets and to build new sleep staging model.
 The library handles all the steps of sleep staging pipeline, like data loading, preprocessing, normalization, model training on a labeled dataset and inference on an unlabeled dataset.
 
+
+DOD-O and DOD-H can be downloaded on [Zenodo](https://zenodo.org/records/15900394)
+
 ## Prerequisites
 The library was built using python 3.6. A requirements.txt file is
 included with all the required python libraries. The data can be
@@ -71,9 +74,8 @@ Fig 1. shows the overall inference pipeline, Fig 2. adds the Trainer and its ret
 
 ## Download of DOD-O and DOD-H
 
-DOD-O and DOD-H can be downloaded using the download_data.py script in this repository. They are also available in GUI here: https://dreem-dodo-dodh.s3.eu-west-1.amazonaws.com/index.html
-The annotations are in: [Octave evaluation repository](https://github.com/Dreem-Organization/dreem-learning-evaluation).
-The records will be queried from S3 and saved under .h5 format. Each h5 is in the following format:
+DOD-O and DOD-H can be downloaded on [Zenodo](https://zenodo.org/records/15900394)
+The records are saved in a zip containing .h5 formatted files. Each h5 is in the following format:
 * Hypnogram: Array
 * Signals: 
    * Signal 1: Array 
