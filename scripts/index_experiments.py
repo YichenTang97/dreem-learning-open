@@ -58,6 +58,8 @@ def build_loov_fold_map(dataset_setting: dict, memmap_description: dict) -> Dict
 
 
 def check_run_complete(run_dir: str, description: dict) -> Tuple[bool, Optional[str]]:
+    if not isinstance(description, dict):
+        return False, "invalid_description_type"
     required_files = [
         os.path.join(run_dir, "description.json"),
         os.path.join(run_dir, "hypnograms.json"),
@@ -72,7 +74,10 @@ def check_run_complete(run_dir: str, description: dict) -> Tuple[bool, Optional[
     if not meta.get("end"):
         return False, "metadata.end_missing"
 
-    test_records = description.get("records_split", {}).get("test_records", [])
+    records_split = description.get("records_split")
+    if not isinstance(records_split, dict):
+        records_split = {}
+    test_records = records_split.get("test_records", [])
     if not isinstance(test_records, list) or len(test_records) != 1:
         return False, "invalid_test_records"
 
@@ -85,9 +90,14 @@ def check_run_complete(run_dir: str, description: dict) -> Tuple[bool, Optional[
 
 def parse_run(run_root: str, run_id: str, fold_map: Dict[str, int], metric: str) -> dict:
     run_dir = os.path.join(run_root, run_id)
+    try:
+        run_path_for_output = os.path.relpath(run_dir, os.getcwd())
+    except Exception:
+        run_path_for_output = run_dir
+    run_path_for_output = run_path_for_output.replace("\\", "/")
     record = {
         "run_id": run_id,
-        "run_path": run_dir,
+        "run_path": run_path_for_output,
         "status": "failed",
         "reason": None,
         "fold_idx": None,
@@ -121,7 +131,13 @@ def parse_run(run_root: str, run_id: str, fold_map: Dict[str, int], metric: str)
     # which on Windows often yields the parent directory instead of record id.
     # Recover robustly from dataset_parameters.split.test (full memmap path).
     if test_record not in fold_map:
-        split_test = description.get("dataset_parameters", {}).get("split", {}).get("test")
+        dataset_parameters = description.get("dataset_parameters")
+        if not isinstance(dataset_parameters, dict):
+            dataset_parameters = {}
+        split = dataset_parameters.get("split")
+        if not isinstance(split, dict):
+            split = {}
+        split_test = split.get("test")
         if isinstance(split_test, list) and len(split_test) == 1 and isinstance(split_test[0], str):
             recovered = os.path.basename(os.path.normpath(split_test[0]))
             if recovered in fold_map:

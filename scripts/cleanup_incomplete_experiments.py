@@ -18,6 +18,8 @@ from dreem_learning_open.settings import EXPERIMENTS_DIRECTORY
 
 
 def check_run_complete(run_dir: str, description: dict) -> Tuple[bool, Optional[str]]:
+    if not isinstance(description, dict):
+        return False, "invalid_description_type"
     required_files = [
         os.path.join(run_dir, "description.json"),
         os.path.join(run_dir, "hypnograms.json"),
@@ -32,7 +34,10 @@ def check_run_complete(run_dir: str, description: dict) -> Tuple[bool, Optional[
     if not meta.get("end"):
         return False, "metadata.end_missing"
 
-    test_records = description.get("records_split", {}).get("test_records", [])
+    records_split = description.get("records_split")
+    if not isinstance(records_split, dict):
+        records_split = {}
+    test_records = records_split.get("test_records", [])
     if not isinstance(test_records, list) or len(test_records) != 1:
         return False, "invalid_test_records"
 

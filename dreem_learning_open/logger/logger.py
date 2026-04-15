@@ -1,4 +1,5 @@
 import hashlib
+import copy
 import json
 import os
 import shutil
@@ -6,6 +7,7 @@ import time
 import uuid
 
 import git
+import torch
 
 from ..datasets.dataset import DreemDataset
 from ..models.modulo_net.net import ModuloNet
@@ -17,6 +19,39 @@ from ..utils.train_test_val_split import train_test_val_split
 
 def memmap_hash(memmap_description):
     return hashlib.sha1(json.dumps(memmap_description).encode()).hexdigest()[:10]
+
+
+def _to_relative_path(path):
+    if not isinstance(path, str):
+        return path
+    try:
+        rel = os.path.relpath(path, os.getcwd())
+        # Store portable separators in metadata/json so files are cross-OS.
+        return rel.replace('\\', '/')
+    except Exception:
+        # Cross-drive paths on Windows can raise ValueError; keep original in that case.
+        return path.replace('\\', '/')
+
+
+def _dataset_settings_for_description(dataset_settings):
+    data = copy.deepcopy(dataset_settings)
+    for key in ['h5_directory', 'memmap_directory']:
+        if key in data:
+            data[key] = _to_relative_path(data[key])
+    if 'records_name' in data and isinstance(data['records_name'], list):
+        data['records_name'] = [_to_relative_path(x) for x in data['records_name']]
+    return data
+
+
+def _dataset_parameters_for_description(dataset_parameters):
+    data = copy.deepcopy(dataset_parameters)
+    split = data.get('split')
+    if isinstance(split, dict):
+        for key in ['train', 'val', 'test']:
+            value = split.get(key)
+            if isinstance(value, list):
+                split[key] = [_to_relative_path(x) for x in value]
+    return data
 
 
 def log_experiment(dataset_settings, memmap_description, dataset_parameters,
@@ -97,12 +132,15 @@ def log_experiment(dataset_settings, memmap_description, dataset_parameters,
                                 temporal_context_mode=dataset_parameters['temporal_context_mode'],
                                 records=test_records)
 
+    dataset_settings_desc = _dataset_settings_for_description(dataset_settings)
+    dataset_parameters_desc = _dataset_parameters_for_description(dataset_parameters)
+
     experiment_description = {
         'metadata': metadata,
-        'dataset_settings': dataset_settings,
+        'dataset_settings': dataset_settings_desc,
         'memmap_description': memmap_description,
         'groups_description': groups_description,
-        'dataset_parameters': dataset_parameters,
+        'dataset_parameters': dataset_parameters_desc,
 
         'normalization_parameters': normalization_parameters,
         'trainers_parameters': trainer_parameters,
@@ -133,9 +171,29 @@ def log_experiment(dataset_settings, memmap_description, dataset_parameters,
         print('Load net with parameters:', net_parameters)
 
     else:
-        normalization_parameters_init = initialize_standardization_parameters(
-            dataset_train,
-            normalization_parameters)
+        normalization_cache_path = os.path.join(save_folder, "normalization_parameters_cache.pt")
+        normalization_parameters_init = None
+        if os.path.isfile(normalization_cache_path):
+            try:
+                normalization_parameters_init = torch.load(normalization_cache_path, map_location='cpu')
+                if not isinstance(normalization_parameters_init, dict):
+                    normalization_parameters_init = None
+                else:
+                    print("Loaded normalization cache:", normalization_cache_path)
+            except Exception as exc:
+                print("Failed to load normalization cache (recomputing):", exc)
+                normalization_parameters_init = None
+
+        if normalization_parameters_init is None:
+            normalization_parameters_init = initialize_standardization_parameters(
+                dataset_train,
+                normalization_parameters)
+            try:
+                torch.save(normalization_parameters_init, normalization_cache_path)
+                print("Saved normalization cache:", normalization_cache_path)
+            except Exception as exc:
+                print("Failed to save normalization cache:", exc)
+
         net = ModuloNet(groups=dataset_train.groups_description,
                         features=dataset_train.features_description,
                         normalization_parameters=normalization_parameters_init,
@@ -175,18 +233,18 @@ def log_experiment(dataset_settings, memmap_description, dataset_parameters,
                                performance_per_records.items()}
 
     records_split = {
-        'train_records': [os.path.split(record)[-2] for record in train_records],
-        'validation_records': [os.path.split(record)[-2] for record in validation_records],
-        'test_records': [os.path.split(record)[-2] for record in test_records]
+        'train_records': [os.path.basename(os.path.normpath(record)) for record in train_records],
+        'validation_records': [os.path.basename(os.path.normpath(record)) for record in validation_records],
+        'test_records': [os.path.basename(os.path.normpath(record)) for record in test_records]
     }
     # experiment_description
     experiment_description = {
         'metadata': metadata,
-        'dataset_settings': dataset_settings,
+        'dataset_settings': dataset_settings_desc,
         'memmap_description': memmap_description,
         'groups_description': groups_description,
         'features_description': features_description,
-        'dataset_parameters': dataset_parameters,
+        'dataset_parameters': dataset_parameters_desc,
 
         'normalization_parameters': normalization_parameters,
         'trainers_parameters': trainer_parameters,
