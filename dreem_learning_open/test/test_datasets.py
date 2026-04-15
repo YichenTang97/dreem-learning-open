@@ -43,8 +43,8 @@ def test_dataset_base():
         expected_shape = (
             temporal_context, expected_properties[group]['shape'][1],
             30 * expected_properties[group]['fs'])
-        assert (fake_dataset[0]['groups'][group].size() == expected_shape,
-                'Group do not have the right shape')
+        assert fake_dataset[0]['groups'][group].size() == expected_shape, \
+            'Group do not have the right shape'
 
     assert torch.max(fake_dataset[0]['hypnogram']) >= 0, 'Some hypnogram have no valid values'
     assert fake_dataset[0]['hypnogram'].size() == (

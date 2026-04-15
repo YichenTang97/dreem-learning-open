@@ -31,7 +31,7 @@ def run_experiments(experiments, experiments_directory, output_directory, datase
                     else:
                         exp_name_bis = exp_name
                     dataset_setting = datasets[dataset]
-                    save_folder = os.path.split(output_directory, dataset, exp_name_bis)
+                    save_folder = os.path.join(output_directory, dataset, exp_name_bis)
                     if os.path.exists(save_folder) and force:
                         shutil.rmtree(save_folder)
 
@@ -80,11 +80,16 @@ def run_experiments(experiments, experiments_directory, output_directory, datase
                         # LOOV training
                         folds = [[record] for record in available_dreem_records]
 
+                    # Do not mutate `fold_to_run`: when it is None we must recompute per
+                    # (experiment, memmap, dataset_parameter) or later experiments reuse the
+                    # first experiment's fold count (wrong folds / skipped folds).
                     if fold_to_run is None:
-                        fold_to_run = [j for j, _ in enumerate(folds)]
+                        effective_fold_indices = [j for j, _ in enumerate(folds)]
+                    else:
+                        effective_fold_indices = list(fold_to_run)
 
                     for i, fold in enumerate(folds):
-                        if i in fold_to_run:
+                        if i in effective_fold_indices:
                             other_records = [record for record in available_dreem_records if
                                              record not in fold]
                             rd.seed(2019 + i)

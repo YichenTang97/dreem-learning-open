@@ -152,7 +152,20 @@ def log_experiment(dataset_settings, memmap_description, dataset_parameters,
 
     metadata['end'] = int(time.time())
 
-    best_net = ModuloNet.load(os.path.join(trainer_save_folder, 'best_net'))
+    best_path = os.path.join(trainer_save_folder, 'best_net')
+    if not os.path.isfile(best_path):
+        # Legacy path from older Trainer.save_weights string concatenation bug
+        legacy_path = os.path.join(os.path.dirname(trainer_save_folder), 'trainingbest_net')
+        if os.path.isfile(legacy_path):
+            shutil.copy2(legacy_path, best_path)
+    if not os.path.isfile(best_path):
+        raise FileNotFoundError(
+            "Could not find saved best model at {!r} (also checked legacy {!r}).".format(
+                best_path,
+                os.path.join(os.path.dirname(trainer_save_folder), 'trainingbest_net'),
+            )
+        )
+    best_net = ModuloNet.load(best_path)
     trainer = Trainer(net=best_net, save_folder=trainer_save_folder,
                       **trainer_parameters['args'])
 

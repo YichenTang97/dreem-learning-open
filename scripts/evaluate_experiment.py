@@ -7,8 +7,10 @@ import os
 experiment_folder = 'pretrained_model/dodo/simple_sleep_net/'
 memmaps_description = json.load(open(os.path.join(experiment_folder, "description.json")))[
     'memmap_description']  # As defined above
-records = [DODO_SETTINGS['h5_directory'] + '/' + record for record in
-           os.listdir(DODO_SETTINGS['h5_directory'])]
+records = [
+    os.path.join(DODO_SETTINGS['h5_directory'], record)
+    for record in os.listdir(DODO_SETTINGS['h5_directory'])
+]
 output_memmap_folder, groups_description, features_description = h5_to_memmaps(
     records,
     DODO_SETTINGS['memmap_directory'],

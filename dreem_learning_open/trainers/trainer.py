@@ -5,7 +5,6 @@ import os
 from .regularization import regularizers
 import numpy as np
 from torch.utils.data import DataLoader
-from torchcontrib.optim import SWA
 from tqdm import tqdm as tqdm
 
 from ..models.modulo_net.net import ModuloNet
@@ -78,6 +77,15 @@ class Trainer:
                                                                             'args'])
 
         if self.swa_params is not None:
+            try:
+                from torchcontrib.optim import SWA
+            except ImportError as e:
+                raise ImportError(
+                    "Trainer requested SWA (swa in trainer args) but `torchcontrib` is not "
+                    "installed. This repo's bundled experiments do not use SWA; remove "
+                    "`swa` from trainer args, or install legacy torchcontrib against an "
+                    "old PyTorch (not supported on Python 3.12)."
+                ) from e
             self.optimizer = SWA(self.base_optimizer, **self.swa_params)
             self.swa = True
             self.averaged_weights = False
@@ -155,7 +163,7 @@ class Trainer:
         args, hypnogram = self.net.get_args(data)
         device = self.net.device
         hypnogram = hypnogram.to(device)
-        mask = [hypnogram != mask]
+        mask = hypnogram != mask
         hypnogram = hypnogram[mask]
 
         # zero the network parameters gradien
@@ -184,7 +192,7 @@ class Trainer:
         args, hypnogram = self.net.get_args(data)
         device = self.net.device
         hypnogram = hypnogram.to(device)
-        mask = [hypnogram != mask]
+        mask = hypnogram != mask
         hypnogram = hypnogram[mask]
         # forward
         output = self.net.forward(*args)[0]
@@ -289,7 +297,7 @@ class Trainer:
                 self.save_weights(str(epoch) + "_net")
 
                 json.dump(metrics_epoch,
-                          open(self.save_folder + str(epoch) + "_metrics_epoch.json", "w"))
+                          open(os.path.join(self.save_folder, str(epoch) + "_metrics_epoch.json"), "w"))
 
             if value > best_value:
                 print("New best {} !".format(self.metric_to_maximize), value)
@@ -303,7 +311,7 @@ class Trainer:
                 if self.save_folder:
                     self.save_weights('best_net')
                     json.dump(metrics_epoch,
-                              open(self.save_folder + "metrics_best_epoch.json", "w"))
+                              open(os.path.join(self.save_folder, "metrics_best_epoch.json"), "w"))
             else:
                 counter_patience += 1
 
@@ -314,4 +322,4 @@ class Trainer:
         return metrics_final
 
     def save_weights(self, file_name):
-        self.net.save(self.save_folder + file_name)
+        self.net.save(os.path.join(self.save_folder, file_name))

@@ -11,6 +11,9 @@ settings.py
 # h5 extensions
 *.h5
 
+# Local datasets (H5, memmaps, experiments, results)
+data/
+
 # Distribution / packaging
 .Python
 env/

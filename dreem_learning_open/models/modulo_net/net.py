@@ -1,5 +1,7 @@
 import copy
 import json
+import os
+import sys
 import tarfile
 import tempfile
 
@@ -270,6 +272,15 @@ class ModuloNet(nn.Module):
 
                           mode: str = 'arithmetic', return_hidden_state=False):
         self.eval()
+        def _stable_softmax(logits):
+            logits_max = np.max(logits, axis=-1, keepdims=True)
+            exp_shifted = np.exp(logits - logits_max)
+            return exp_shifted / np.sum(exp_shifted, axis=-1, keepdims=True)
+
+        def _stable_log_softmax(logits):
+            logits_max = np.max(logits, axis=-1, keepdims=True)
+            logsumexp = logits_max + np.log(np.sum(np.exp(logits - logits_max), axis=-1, keepdims=True))
+            return logits - logsumexp
 
         if self.training:
             output_mode = self.output_mode
@@ -304,9 +315,9 @@ class ModuloNet(nn.Module):
 
             preds = preds.reshape((batch_size, -1, n_class))
             if mode == 'geometric':
-                preds = np.log(np.exp(preds) / np.sum(np.exp(preds), axis=-1, keepdims=True))
+                preds = _stable_log_softmax(preds)
             elif mode == 'arithmetic':
-                preds = np.exp(preds) / np.sum(np.exp(preds), axis=-1, keepdims=True)
+                preds = _stable_softmax(preds)
             elif mode == 'vote':
                 preds = (preds == preds.max(axis=-1, keepdims=True)).astype(int)
 
@@ -322,11 +333,9 @@ class ModuloNet(nn.Module):
 
         if return_prob:
             if return_hidden_state:
-                return np.exp(predicted_output) / np.sum(np.exp(predicted_output), -1,
-                                                         keepdims=True), record_hidden_states
+                return _stable_softmax(predicted_output), record_hidden_states
             else:
-                return np.exp(predicted_output) / np.sum(np.exp(predicted_output), -1,
-                                                         keepdims=True)
+                return _stable_softmax(predicted_output)
         else:
             if return_hidden_state:
                 return np.argmax(predicted_output, -1), record_hidden_states
@@ -375,12 +384,16 @@ class ModuloNet(nn.Module):
 
             # State
             path = tempfile.mkdtemp()
-            tar.extract("state.torch", path=path)
+            _extract_kw = {}
+            if sys.version_info >= (3, 12):
+                _extract_kw["filter"] = "data"
+            tar.extract("state.torch", path=path, **_extract_kw)
             net = cls(groups, features, normalization_parameters, net_parameters)
+            state_path = os.path.join(path, "state.torch")
             if torch.cuda.is_available():
-                net.load_state_dict(torch.load(path + "/state.torch"))
+                net.load_state_dict(torch.load(state_path))
             else:
                 net = net.to('cpu')
-                net.load_state_dict(torch.load(path + "/state.torch", map_location='cpu'))
+                net.load_state_dict(torch.load(state_path, map_location='cpu'))
 
         return net
