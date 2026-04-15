@@ -217,15 +217,20 @@ class DreemDataset(Dataset):
             sample['groups'] = augment_data(sample['groups'], self.transform_parameters)
 
         for group in self.groups:
-            sample['groups'][group] = torch.Tensor(sample['groups'][group])
+            sample['groups'][group] = torch.tensor(
+                np.array(sample['groups'][group], copy=True))
 
         for feature in self.features:
-            sample['features'][feature] = torch.Tensor(
-                self.features_data[record][feature][start_idx:end_idx])
+            sample['features'][feature] = torch.tensor(
+                np.array(
+                    self.features_data[record][feature][start_idx:end_idx],
+                    copy=True,
+                ))
 
         # Retrieve hypnogram
-        sample['hypnogram'] = torch.LongTensor(
-            self.hypnogram[record][start_idx:end_idx]
+        sample['hypnogram'] = torch.tensor(
+            np.array(self.hypnogram[record][start_idx:end_idx], copy=True),
+            dtype=torch.long,
         )
 
         return sample

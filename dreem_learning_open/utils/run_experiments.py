@@ -13,8 +13,90 @@ def memmap_hash(memmap_description):
     return hashlib.sha1(json.dumps(memmap_description).encode()).hexdigest()[:10]
 
 
+def _recover_test_record_id(description):
+    if not isinstance(description, dict):
+        return None
+    records_split = description.get('records_split')
+    if not isinstance(records_split, dict):
+        records_split = {}
+    test_records = records_split.get('test_records', [])
+    if isinstance(test_records, list) and len(test_records) == 1 and isinstance(test_records[0], str):
+        candidate = test_records[0]
+        if candidate and os.sep not in candidate and '/' not in candidate and '\\' not in candidate:
+            return candidate
+
+    dataset_parameters = description.get('dataset_parameters')
+    if not isinstance(dataset_parameters, dict):
+        dataset_parameters = {}
+    split = dataset_parameters.get('split')
+    if not isinstance(split, dict):
+        split = {}
+    split_test = split.get('test')
+    if isinstance(split_test, list) and len(split_test) == 1 and isinstance(split_test[0], str):
+        return os.path.basename(os.path.normpath(split_test[0]))
+    return None
+
+
+def _is_run_complete(run_dir, description):
+    if not isinstance(description, dict):
+        return False
+    required_files = [
+        os.path.join(run_dir, 'description.json'),
+        os.path.join(run_dir, 'hypnograms.json'),
+        os.path.join(run_dir, 'best_model.gz'),
+        os.path.join(run_dir, 'training', 'best_net'),
+    ]
+    if not all(os.path.isfile(path) for path in required_files):
+        return False
+    if not description.get('metadata', {}).get('end'):
+        return False
+    perf = description.get('performance_on_test_set')
+    return isinstance(perf, dict) and len(perf) > 0
+
+
+def _find_incomplete_run_ids_by_test_record(save_folder):
+    """
+    Return map: test_record_id -> run_uuid for runs that are present but incomplete.
+    If multiple incomplete runs exist for one test record, keep the most recent.
+    """
+    if not os.path.isdir(save_folder):
+        return {}
+
+    chosen = {}
+    for run_uuid in os.listdir(save_folder):
+        run_dir = os.path.join(save_folder, run_uuid)
+        if not os.path.isdir(run_dir):
+            continue
+
+        description_path = os.path.join(run_dir, 'description.json')
+        if not os.path.isfile(description_path):
+            continue
+        try:
+            with open(description_path, 'r') as f:
+                description = json.load(f)
+        except Exception:
+            continue
+        if not isinstance(description, dict):
+            continue
+
+        test_record_id = _recover_test_record_id(description)
+        if not test_record_id:
+            continue
+        if _is_run_complete(run_dir, description):
+            continue
+
+        metadata = description.get('metadata', {})
+        last_activity = metadata.get('end') or metadata.get('begin') or int(os.path.getmtime(description_path))
+        previous = chosen.get(test_record_id)
+        if previous is None or last_activity > previous['last_activity']:
+            chosen[test_record_id] = {'run_uuid': run_uuid, 'last_activity': last_activity}
+
+    return {k: v['run_uuid'] for k, v in chosen.items()}
+
+
 def run_experiments(experiments, experiments_directory, output_directory, datasets,
-                    fold_to_run=None, force=True, error_tolerant=False):
+                    fold_to_run=None, force=True, error_tolerant=False,
+                    skip_memmap_build=False, reuse_incomplete_uuids=False):
     for experiment in experiments:
         experiment_directory = os.path.join(experiments_directory, experiment)
         memmaps_description = json.load(open(os.path.join(experiment_directory, 'memmaps.json')))
@@ -35,6 +117,10 @@ def run_experiments(experiments, experiments_directory, output_directory, datase
                     if os.path.exists(save_folder) and force:
                         shutil.rmtree(save_folder)
 
+                    incomplete_run_ids_by_test_record = {}
+                    if reuse_incomplete_uuids and not force:
+                        incomplete_run_ids_by_test_record = _find_incomplete_run_ids_by_test_record(save_folder)
+
                     normalization = json.load(
                         open(os.path.join(experiment_directory, 'normalization.json')))
                     trainer = json.load(open(os.path.join(experiment_directory, 'trainer.json')))
@@ -46,17 +132,22 @@ def run_experiments(experiments, experiments_directory, output_directory, datase
                     temporal_context_mode = dataset_parameter['temporal_context_mode']
 
                     description_hash = memmap_hash(memmap_description)
-                    h5_to_memmaps(
-                        records=[os.path.join(dataset_setting['h5_directory'], record) for record in
-                                 os.listdir(dataset_setting['h5_directory'])],
-                        memmap_description=memmap_description,
-                        memmap_directory=dataset_setting['memmap_directory'],
-                        parallel=False,
-                        error_tolerant=error_tolerant)
                     dataset_dir = os.path.join(
                         dataset_setting['memmap_directory'],
                         description_hash
                     )
+                    if not skip_memmap_build:
+                        h5_to_memmaps(
+                            records=[os.path.join(dataset_setting['h5_directory'], record) for record in
+                                     os.listdir(dataset_setting['h5_directory'])],
+                            memmap_description=memmap_description,
+                            memmap_directory=dataset_setting['memmap_directory'],
+                            parallel=False,
+                            error_tolerant=error_tolerant)
+                    elif not os.path.isdir(dataset_dir):
+                        raise FileNotFoundError(
+                            'skip_memmap_build=True but memmap directory is missing: {!r}'.format(
+                                dataset_dir))
                     available_dreem_records = [
                         os.path.join(dataset_dir, record) for record in
                         os.listdir(dataset_dir) if '.json' not in record
@@ -118,5 +209,11 @@ def run_experiments(experiments, experiments_directory, output_directory, datase
                                 'save_folder': os.path.join(output_directory, dataset, exp_name_bis),
                             }
 
+                            experiment_id = None
+                            if reuse_incomplete_uuids and len(fold) == 1:
+                                test_record_id = os.path.basename(os.path.normpath(fold[0]))
+                                experiment_id = incomplete_run_ids_by_test_record.get(test_record_id)
+
                             log_experiment(**experiment_description, parralel=True,
-                                           generate_memmaps=False)
+                                           generate_memmaps=False,
+                                           experiment_id=experiment_id)

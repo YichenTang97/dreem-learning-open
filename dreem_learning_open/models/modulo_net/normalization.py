@@ -20,9 +20,19 @@ def affine(x, gain, bias=0):
 def torch_spectrogram(signal, n_fft=None, hop=None, window=np.hanning):
     window = window(n_fft) / window(n_fft).sum()
     window = torch.from_numpy(window).to(signal.device).float()
-    stft = torch.stft(signal, n_fft=n_fft, hop_length=hop, win_length=n_fft,
-                      window=window, onesided=True, center=False, normalized=False)
-    stft = (stft ** 2).sum(-1)
+    stft = torch.stft(
+        signal,
+        n_fft=n_fft,
+        hop_length=hop,
+        win_length=n_fft,
+        window=window,
+        onesided=True,
+        center=False,
+        normalized=False,
+        return_complex=True,
+    )
+    # Power spectrogram (same as real^2 + imag^2 with legacy stacked-real STFT output)
+    stft = stft.abs().pow(2)
     return stft
 
 
