@@ -7,8 +7,41 @@
     "eeg": {
       "type": "CNNMaxPoolEpochEncoder",
       "args": {
-        "cnn_features": 256,
-        "dropout": 0.25
+        "conv_layers": [
+          {
+            "in_channels": 1,
+            "out_channels": 16,
+            "kernel_size": 64,
+            "stride": 4,
+            "padding": 32,
+            "bias": false,
+            "activation": "elu",
+            "batch_norm": true,
+            "dropout": 0.25
+          },
+          {
+            "in_channels": 16,
+            "out_channels": 64,
+            "kernel_size": 16,
+            "stride": 4,
+            "padding": 8,
+            "bias": false,
+            "activation": "elu",
+            "batch_norm": true,
+            "dropout": 0.25
+          },
+          {
+            "in_channels": 64,
+            "out_channels": 128,
+            "kernel_size": 8,
+            "stride": 2,
+            "padding": 4,
+            "bias": false,
+            "activation": "elu",
+            "batch_norm": true,
+            "dropout": 0.0
+          }
+        ]
       }
     }
   },
@@ -24,7 +57,7 @@
       "cells": 128,
       "bidir": false,
       "dropout": 0.5,
-      "layers": 1
+      "layers": 2
     }
   }
 }

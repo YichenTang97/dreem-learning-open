@@ -51,55 +51,87 @@ from .epoch_encoder import EpochEncoder
 # Shared per-channel CNN
 # ---------------------------------------------------------------------------
 
+def _activation_from_name(name: str) -> nn.Module:
+    activations = {
+        "relu": nn.ReLU,
+        "leaky_relu": nn.LeakyReLU,
+        "elu": nn.ELU,
+        "gelu": nn.GELU,
+        "silu": nn.SiLU,
+        "selu": nn.SELU,
+        "tanh": nn.Tanh,
+        "identity": nn.Identity,
+    }
+    key = str(name).lower()
+    if key not in activations:
+        raise ValueError(
+            f"Unknown activation {name!r}. "
+            f"Available: {sorted(activations.keys())}"
+        )
+    return activations[key]()
+
+
 class PerChannelCNN(nn.Module):
     """
-    Three-block 1D convolutional network applied independently to each
-    EEG channel (or to all channels simultaneously via a reshape trick).
-
-    Architecture choices are informed by the temporal scale of EEG features
-    relevant to sleep onset:
-        Block 1  kernel=100, stride=50  → captures ~0.5–2 s features
-                                          (slow oscillations, K-complexes)
-        Block 2  kernel=8,   stride=4   → captures ~0.1 s features
-                                          (alpha oscillations ~8–12 Hz)
-        Block 3  kernel=4,   stride=2   → fine-grained temporal features
-        Adaptive average pool → 1 step  → fixed output size
-
-    At 100 Hz × 3000 samples:
-        After block 1 : ⌊(3000-100)/50⌋ + 1  = 59 time steps
-        After block 2 : ⌊(59  -  8)/ 4⌋ + 1  = 14 time steps
-        After block 3 : ⌊(14  -  4)/ 2⌋ + 1  = 6  time steps
-        After AdaptAvgPool(1) → 1 time step → squeeze to (N, out_features)
+    Configurable 1D CNN applied independently to each EEG channel
+    (or to all channels simultaneously via a reshape trick).
 
     Parameters
     ----------
-    out_features : int
-        Number of CNN output features per channel (default 256).
-    dropout : float
-        Dropout probability applied after each activation (default 0.25).
+    conv_layers : list[dict]
+        One dict per convolution block:
+        {
+          "in_channels": int,
+          "out_channels": int,
+          "kernel_size": int,
+          "stride": int,
+          "padding": int,
+          "bias": bool,
+          "activation": str,
+          "batch_norm": bool,
+          "dropout": float
+        ]
     """
 
-    def __init__(self, out_features: int = 256, dropout: float = 0.25):
+    def __init__(self, conv_layers: list):
         super().__init__()
-        self.out_features = out_features
-        self.net = nn.Sequential(
-            # ---- Block 1: broad temporal features ----
-            nn.Conv1d(1, 32, kernel_size=100, stride=50, padding=0, bias=False),
-            nn.BatchNorm1d(32),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            # ---- Block 2: medium temporal features ----
-            nn.Conv1d(32, 64, kernel_size=8, stride=4, padding=0, bias=False),
-            nn.BatchNorm1d(64),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            # ---- Block 3: fine temporal features ----
-            nn.Conv1d(64, out_features, kernel_size=4, stride=2, padding=0, bias=False),
-            nn.BatchNorm1d(out_features),
-            nn.GELU(),
-            # ---- Global average pooling → scalar per feature ----
-            nn.AdaptiveAvgPool1d(1),
-        )
+        if not isinstance(conv_layers, list) or len(conv_layers) == 0:
+            raise ValueError("conv_layers must be a non-empty list.")
+        blocks = []
+        for idx, cfg in enumerate(conv_layers):
+            required = [
+                "in_channels",
+                "out_channels",
+                "kernel_size",
+                "stride",
+                "padding",
+                "bias",
+                "activation",
+            ]
+            missing = [k for k in required if k not in cfg]
+            if missing:
+                raise ValueError(
+                    f"conv_layers[{idx}] missing keys: {missing}"
+                )
+            blocks.append(
+                nn.Conv1d(
+                    in_channels=int(cfg["in_channels"]),
+                    out_channels=int(cfg["out_channels"]),
+                    kernel_size=int(cfg["kernel_size"]),
+                    stride=int(cfg["stride"]),
+                    padding=int(cfg["padding"]),
+                    bias=bool(cfg["bias"]),
+                )
+            )
+            if bool(cfg.get("batch_norm", True)):
+                blocks.append(nn.BatchNorm1d(int(cfg["out_channels"])))
+            blocks.append(_activation_from_name(cfg["activation"]))
+            dropout = float(cfg.get("dropout", 0.0))
+            if dropout > 0.0:
+                blocks.append(nn.Dropout(dropout))
+        blocks.append(nn.AdaptiveAvgPool1d(1))
+        self.net = nn.Sequential(*blocks)
+        self.out_features = int(conv_layers[-1]["out_channels"])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -125,8 +157,11 @@ class CNNMaxPoolEpochEncoder(EpochEncoder):
     max-pools across channels to produce a fixed-size epoch embedding.
 
     Configuration keys (in net.json under encoder 'args'):
-        cnn_features  : int    output feature dimension per channel (default 256)
-        dropout       : float  dropout probability                  (default 0.25)
+        conv_layers : list[dict] full per-layer CNN definition.
+
+    Backward compatibility:
+        If conv_layers is omitted, legacy keys
+        (cnn_features + dropout) are mapped to a default stack.
 
     Example net.json snippet::
 
@@ -138,12 +173,97 @@ class CNNMaxPoolEpochEncoder(EpochEncoder):
                     "dropout": 0.25
                 }
             }
-        }
+        ]
     """
 
     @staticmethod
     def defaut_net_parameters():
-        return {"cnn_features": 256, "dropout": 0.25}
+        # EEGNet-inspired defaults:
+        # - ELU activation (as in EEGNet)
+        # - larger temporal kernels in early layers, then progressively smaller kernels
+        #   to capture coarse-to-fine EEG temporal patterns.
+        return {
+            "cnn_features": 256,
+            "dropout": 0.25,
+            "conv_layers": [
+                {
+                    "in_channels": 1,
+                    "out_channels": 16,
+                    "kernel_size": 64,
+                    "stride": 4,
+                    "padding": 32,
+                    "bias": False,
+                    "activation": "elu",
+                    "batch_norm": True,
+                    "dropout": 0.25,
+                },
+                {
+                    "in_channels": 16,
+                    "out_channels": 64,
+                    "kernel_size": 16,
+                    "stride": 4,
+                    "padding": 8,
+                    "bias": False,
+                    "activation": "elu",
+                    "batch_norm": True,
+                    "dropout": 0.25,
+                },
+                {
+                    "in_channels": 64,
+                    "out_channels": 256,
+                    "kernel_size": 8,
+                    "stride": 2,
+                    "padding": 4,
+                    "bias": False,
+                    "activation": "elu",
+                    "batch_norm": True,
+                    "dropout": 0.0,
+                },
+            ],
+        }
+
+    def _resolved_conv_layers(self) -> list:
+        if "conv_layers" in self.net_parameters and self.net_parameters["conv_layers"] is not None:
+            return self.net_parameters["conv_layers"]
+
+        # Legacy fallback path (old configs using cnn_features/dropout)
+        cnn_features = int(self.net_parameters.get("cnn_features", 256))
+        dropout = float(self.net_parameters.get("dropout", 0.25))
+        return [
+            {
+                "in_channels": 1,
+                "out_channels": 32,
+                "kernel_size": 100,
+                "stride": 50,
+                "padding": 0,
+                "bias": False,
+                "activation": "gelu",
+                "batch_norm": True,
+                "dropout": dropout,
+            },
+            {
+                "in_channels": 32,
+                "out_channels": 64,
+                "kernel_size": 8,
+                "stride": 4,
+                "padding": 0,
+                "bias": False,
+                "activation": "gelu",
+                "batch_norm": True,
+                "dropout": dropout,
+            },
+            {
+                "in_channels": 64,
+                "out_channels": cnn_features,
+                "kernel_size": 4,
+                "stride": 2,
+                "padding": 0,
+                "bias": False,
+                "activation": "gelu",
+                "batch_norm": True,
+                "dropout": 0.0,
+            },
+        ]
 
     def init_encoder(self):
         # encoder_input_shape is set by ModuloNet.init_net() to the shape of
@@ -155,9 +275,8 @@ class CNNMaxPoolEpochEncoder(EpochEncoder):
         self.n_channels   = int(shape[2])
         self.signal_length = int(shape[3])
 
-        cnn_features = self.net_parameters["cnn_features"]
-        dropout      = self.net_parameters["dropout"]
-        self.cnn = PerChannelCNN(out_features=cnn_features, dropout=dropout)
+        conv_layers = self._resolved_conv_layers()
+        self.cnn = PerChannelCNN(conv_layers=conv_layers)
         self.cnn.to(self.device)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
