@@ -9,14 +9,14 @@ This note documents the literature-grounded configuration used in `net.json` for
 Per-channel shared 1D CNN with channel-wise max pooling downstream:
 
 1. Conv1: `1 -> 16`, `kernel=64`, `stride=4`, `padding=32`, `bias=false`, `activation=ELU`, `batch_norm=true`, `dropout=0.25`
-2. Conv2: `16 -> 64`, `kernel=16`, `stride=4`, `padding=8`, `bias=false`, `activation=ELU`, `batch_norm=true`, `dropout=0.25`
-3. Conv3: `64 -> 128`, `kernel=8`, `stride=2`, `padding=4`, `bias=false`, `activation=ELU`, `batch_norm=true`, `dropout=0.0`
+2. Conv2: `16 -> 32`, `kernel=16`, `stride=4`, `padding=8`, `bias=false`, `activation=ELU`, `batch_norm=true`, `dropout=0.25`
+3. Conv3: `32 -> 64`, `kernel=8`, `stride=2`, `padding=4`, `bias=false`, `activation=ELU`, `batch_norm=true`, `dropout=0.0`
 4. `AdaptiveAvgPool1d(1)` to produce one embedding vector per channel per epoch.
 
 ### Sequence encoder (`LSTMSequenceEncoder`)
 
 - `layers=2`
-- `cells=128`
+- `cells=64`
 - `bidir=false`
 - `dropout=0.5` (in this repo, dropout is applied inside stacked LSTM and again after recurrent output)
 
@@ -50,16 +50,16 @@ Per-channel shared 1D CNN with channel-wise max pooling downstream:
 
 ### 5) RNN depth/width for this dataset regime
 
-- **Unidirectional 2-layer LSTM (128 cells)** is a practical middle point:
+- **Unidirectional 2-layer LSTM (64 cells)** favors a smaller parameter budget:
   - Unidirectional supports causal/online deployment constraints.
   - Two layers increase transition-modeling capacity over one layer without the full parameter cost of bidirectional stacks.
-  - 128 cells keeps the model compact enough for LOOCV training while adding temporal depth.
+  - 64 cells matches the slimmer CNN embedding and further reduces LOOCV train cost; widen if validation clearly underfits.
 - DeepSleepNet used a heavier 2-layer **BiLSTM** (512/512 directions), which is stronger but less aligned with causal deployment and small-data regularization constraints.
 
 ### 6) Output embedding size
 
-- Final CNN channel embedding set to **128** (not 256) to improve parameter efficiency for LOOCV on a modest subject count.
-- This keeps the model in a compact regime while preserving representational headroom for the LSTM.
+- Final CNN channel embedding set to **64** with a gradual width schedule `16 -> 32 -> 64` to cut parameters versus wider stacks while keeping the same kernel/stride temporal design.
+- The LSTM input width matches this embedding; overall capacity is intentionally modest for small-data / LOOCV regimes.
 
 ## References
 
@@ -77,7 +77,7 @@ Per-channel shared 1D CNN with channel-wise max pooling downstream:
 
 ## Practical Tuning Order (if you iterate)
 
-1. Keep the current backbone fixed and tune only `LSTM cells` in `{96, 128, 160}`.
-2. If underfitting, increase final CNN out channels `128 -> 192`.
-3. If overfitting, reduce Conv2/Conv3 widths first (`64/128 -> 48/96`) before changing recurrent size.
+1. Keep the current backbone fixed and tune only `LSTM cells` in `{48, 64, 96}`.
+2. If underfitting, increase final CNN out channels `64 -> 96` or `64 -> 128`, and/or raise LSTM cells toward `96`.
+3. If overfitting, reduce Conv2/Conv3 widths first (`32/64 -> 24/48`) or add dropout on the last conv block before widening the LSTM.
 4. Keep `bidir=false` unless you intentionally move to offline-only inference.
