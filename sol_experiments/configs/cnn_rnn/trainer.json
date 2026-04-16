@@ -1,0 +1,19 @@
+{
+  "type": "base",
+  "args": {
+    "epochs": 50,
+    "patience": 10,
+    "batch_size": 32,
+    "metric_to_maximize": "accuracy",
+    "optimizer": {
+      "type": "adam",
+      "args": {
+        "lr": 1e-3
+      }
+    },
+    "loss": {
+      "type": "cross_entropy",
+      "args": {}
+    }
+  }
+}

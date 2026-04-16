@@ -1,0 +1,30 @@
+{
+  "n_class": 5,
+  "output_mode": "many",
+  "eval_output_mode": "many",
+  "type": "modulo_net",
+  "encoders": {
+    "eeg": {
+      "type": "CNNMaxPoolEpochEncoder",
+      "args": {
+        "cnn_features": 256,
+        "dropout": 0.25
+      }
+    }
+  },
+  "reducer": {
+    "type": "PoolReducer",
+    "args": {
+      "pool_operation": "max"
+    }
+  },
+  "sequence_encoder": {
+    "type": "LSTMSequenceEncoder",
+    "args": {
+      "cells": 128,
+      "bidir": false,
+      "dropout": 0.5,
+      "layers": 1
+    }
+  }
+}

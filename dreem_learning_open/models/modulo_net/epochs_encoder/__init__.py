@@ -7,6 +7,7 @@ from .legacy.deep_sleep_net_encoder import DeepSleepNetEpochEncoder
 from .legacy.seq_sleep_net import SeqSleepNetEpochEncoder
 from .legacy.tsinalis_net import TsinalisEpochEncoder
 from .simple_sleep_net import SimpleSleepNetEpochEncoder
+from .cnn_max_pool import CNNMaxPoolEpochEncoder
 
 epoch_encoders = {
     "SeqSleepEpochEncoder": SeqSleepNetEpochEncoder,
@@ -15,5 +16,7 @@ epoch_encoders = {
     "ChambonEpochEncoder": ChambonEpochEncoder,
     'TsinalisEpochEncoder': TsinalisEpochEncoder,
     'SimpleSleepNetEpochEncoderWithoutChannelRecombination': SimpleSleepNetEpochEncoderWithoutChannelRecombination,
-    'SimpleSleepNetEpochEncoderWithoutFrequencyReduction': SimpleSleepNetEpochEncoderWithoutFrequencyReduction
+    'SimpleSleepNetEpochEncoderWithoutFrequencyReduction': SimpleSleepNetEpochEncoderWithoutFrequencyReduction,
+    # --- Proposed model: per-channel CNN with cross-channel max-pooling ---
+    'CNNMaxPoolEpochEncoder': CNNMaxPoolEpochEncoder,
 }
