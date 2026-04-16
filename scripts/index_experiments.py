@@ -1,5 +1,6 @@
 """
-Index Simple Sleep Net experiment runs and export completion summaries.
+Index experiment runs under EXPERIMENTS_DIRECTORY/<dataset>/<algo>/ and export
+completion summaries.
 
 Outputs (under data/experiments/dodh/simple_sleep_net by default):
 - completed_folds.jsonl : one JSON record per discovered run with status
@@ -10,6 +11,8 @@ Usage:
     python scripts/index_experiments.py
     python scripts/index_experiments.py --metric cohen_kappa
     python scripts/index_experiments.py --dataset dodh --algo simple_sleep_net
+    python scripts/index_experiments.py --dataset dodh --algo cnn_rnn \\
+        --base-experiments-dir sol_experiments/configs
 """
 import argparse
 import csv
@@ -20,24 +23,31 @@ import random as rd
 import time
 from typing import Dict, List, Optional, Tuple
 
-from dreem_learning_open.settings import DODH_SETTINGS, EXPERIMENTS_DIRECTORY
+from dreem_learning_open.settings import DODO_SETTINGS, DODH_SETTINGS, EXPERIMENTS_DIRECTORY
+
+DATASET_SETTINGS = {
+    "dodh": DODH_SETTINGS,
+    "dodo": DODO_SETTINGS,
+}
 
 
 def memmap_hash(memmap_description: dict) -> str:
     return hashlib.sha1(json.dumps(memmap_description).encode()).hexdigest()[:10]
 
 
-def load_dodh_memmap_description(base_experiments_dir: str, algo: str) -> dict:
+def load_memmap_description(base_experiments_dir: str, algo: str, dataset: str) -> dict:
     memmaps_path = os.path.join(base_experiments_dir, algo, "memmaps.json")
     with open(memmaps_path, "r") as f:
         memmaps_description = json.load(f)
 
     for description in memmaps_description:
-        if description.get("dataset") == "dodh":
+        if description.get("dataset") == dataset:
             description = dict(description)
             del description["dataset"]
             return description
-    raise RuntimeError("No DODH memmap_description found in {}".format(memmaps_path))
+    raise RuntimeError(
+        "No memmap block for dataset={!r} in {}".format(dataset, memmaps_path)
+    )
 
 
 def build_loov_fold_map(dataset_setting: dict, memmap_description: dict) -> Dict[str, int]:
@@ -227,11 +237,17 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if args.dataset != "dodh":
-        raise ValueError("This indexing script currently supports dataset=dodh only")
+    if args.dataset not in DATASET_SETTINGS:
+        raise ValueError(
+            "Unsupported dataset {!r}; expected one of: {}".format(
+                args.dataset, sorted(DATASET_SETTINGS.keys())
+            )
+        )
 
-    dataset_setting = DODH_SETTINGS
-    memmap_description = load_dodh_memmap_description(args.base_experiments_dir, args.algo)
+    dataset_setting = DATASET_SETTINGS[args.dataset]
+    memmap_description = load_memmap_description(
+        args.base_experiments_dir, args.algo, args.dataset
+    )
     fold_map = build_loov_fold_map(dataset_setting, memmap_description)
 
     runs_root = args.runs_root or os.path.join(EXPERIMENTS_DIRECTORY, args.dataset, args.algo)
