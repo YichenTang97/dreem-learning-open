@@ -4,6 +4,7 @@
     "epochs": 50,
     "patience": 10,
     "batch_size": 32,
+    "train_postfix_fraction": 0.1,
     "metric_to_maximize": "accuracy",
     "optimizer": {
       "type": "adam",

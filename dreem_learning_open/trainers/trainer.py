@@ -4,6 +4,7 @@ import json
 import os
 from .regularization import regularizers
 import numpy as np
+import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm as tqdm
 
@@ -27,7 +28,8 @@ class Trainer:
             swa=None,
             optimizer=None,
             num_workers=0,
-            net_methods=None
+            net_methods=None,
+            train_postfix_fraction=0.1,
     ):
         if optimizer is None:
             optimizer = {'type': 'adam', 'args': {'lr': 1e-3}}
@@ -70,6 +72,7 @@ class Trainer:
         self.save_folder = save_folder
         self.batch_size = batch_size
         self.num_workers = num_workers
+        self.train_postfix_fraction = float(train_postfix_fraction)
 
     def reset_optimizer(self):
         self.base_optimizer = optimizers[self.optimizer_params['type']](self.net.parameters(),
@@ -205,18 +208,15 @@ class Trainer:
 
     def train(self, train_dataset, validation_dataset, verbose=1, reset_optimizer=True):
         """
-        for epoch:
-            for batch on train set:
-                train net with optimizer SGD
-                eval on a random batch of validation set
-                print metrics on train set and val set every 1% of dataset
-            Evaluate metrics BY RECORD, take mean
-            if metric_to_maximize value > best_value:
-                store best_net*
-            else:
-                patience += 1
-            if patience to big:
-                return
+        Each epoch:
+            - Run the full training DataLoader; optionally show tqdm with training loss and
+              metrics. Postfix updates (loss + sklearn metrics on buffered predictions) occur
+              every ``train_postfix_fraction`` of the epoch length in batches, and once at
+              epoch end if a partial buffer remains.
+            - Call ``validate(validation_dataset)`` once: full-record predictions, metrics
+              aggregated per record then weighted-averaged (same as early stopping signal).
+            - If ``metric_to_maximize`` improves vs the best so far, save ``best_net``;
+              otherwise increment patience and stop when patience is exceeded.
         """
         if reset_optimizer:
             self.reset_optimizer()
@@ -224,10 +224,15 @@ class Trainer:
         if self.save_folder:
             self.save_weights('best_net')
 
-        dataloader_train = DataLoader(
-            train_dataset, shuffle=True, batch_size=self.batch_size, num_workers=self.num_workers,
-            pin_memory=True
+        loader_kw = dict(
+            shuffle=True,
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            pin_memory=True,
         )
+        if self.num_workers > 0:
+            loader_kw['persistent_workers'] = True
+        dataloader_train = DataLoader(train_dataset, **loader_kw)
 
         metrics_final = {
             metric: 0
@@ -239,51 +244,66 @@ class Trainer:
         for epoch in range(0, self.epochs):
             if verbose == 0:
                 print('EPOCH:', epoch)
-            # init running_loss
-            running_loss_train_epoch = 0
+            # Cumulative batch loss sum on device (avoid per-batch .item() sync).
+            running_loss_sum = torch.zeros((), device=self.net.device, dtype=torch.float32)
             running_metrics = {metric: 0 for metric in self.metrics.keys()}
+            # Per-batch GPU tensors; NumPy + sklearn only when flushing metrics.
             buffer_outputs_train = ([], [])
             if verbose > 0:
                 # Configurate progress bar
                 t = tqdm(dataloader_train, 0)
                 t.set_description("EPOCH {}".format(epoch))
-                update_postfix_every = max(int(len(t) * 0.05), 1)
+                update_postfix_every = max(
+                    int(len(t) * self.train_postfix_fraction), 1)
                 counter_update_postfix = 0
             else:
                 t = dataloader_train
 
+            def _flush_train_metrics_postfix(batch_count):
+                """Accumulate sklearn metrics and refresh tqdm (non-empty buffers)."""
+                nonlocal buffer_outputs_train, counter_update_postfix
+                pred_np = torch.cat(buffer_outputs_train[0]).cpu().numpy()
+                true_np = torch.cat(buffer_outputs_train[1]).cpu().numpy()
+                for metric_name, metric_function in self.metrics.items():
+                    running_metrics[metric_name] += metric_function(
+                        pred_np, true_np
+                    )
+                buffer_outputs_train = ([], [])
+                counter_update_postfix += 1
+                if verbose > 0:
+                    loss_sum_float = running_loss_sum.item()
+                    t.set_postfix(
+                        loss=loss_sum_float / float(batch_count),
+                        **{
+                            k: v / counter_update_postfix
+                            for k, v in running_metrics.items()
+                        },
+                    )
+                    self.loss_values.append((loss_sum_float, batch_count))
+
             t_start_train = time.time()
+            n_batches_seen = 0
             for i, data in enumerate(t):
                 self.on_batch_start()
 
                 if verbose > 0:
                     if (i + 1) % update_postfix_every == 0 and i != 0:
-                        # compute desired metrics each update_postfix_every
-                        for metric_name, metric_function in self.metrics.items():
-                            running_metrics[metric_name] += metric_function(
-                                buffer_outputs_train[0], buffer_outputs_train[1]
-                            )
-                        buffer_outputs_train = ([], [])
-                        counter_update_postfix += 1
-                        t.set_postfix(
-                            loss=running_loss_train_epoch / (i + 1),
-                            **{
-                                k: v / counter_update_postfix
-                                for k, v in running_metrics.items()
-                            }
-                        )
-                        self.loss_values.append((running_loss_train_epoch, i + 1))
+                        if buffer_outputs_train[0]:
+                            _flush_train_metrics_postfix(i + 1)
 
                 # train
                 output, loss_train, hypnogram = self.train_on_batch(data)
 
-                # fill metrics for print
-                running_loss_train_epoch += loss_train.item()
-                buffer_outputs_train[0].extend(list(output.max(1)[1].cpu().numpy()))
-                buffer_outputs_train[1].extend(list(hypnogram.cpu().numpy().flatten()))
+                running_loss_sum = running_loss_sum + loss_train.detach().float()
+                n_batches_seen = i + 1
+                if verbose > 0:
+                    buffer_outputs_train[0].append(output.max(1)[1].detach())
+                    buffer_outputs_train[1].append(hypnogram.detach())
 
                 # gradient descent
                 self.optimizer.step()
+            if verbose > 0 and buffer_outputs_train[0]:
+                _flush_train_metrics_postfix(n_batches_seen)
             t_stop_train = time.time()
 
             t_start_validation = time.time()
