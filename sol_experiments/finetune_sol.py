@@ -28,6 +28,9 @@ Training protocol
 * Best checkpoint selected on validation SOL MAE.
 * Fine-tuned hypnograms.json saved in the same format as base experiments,
   so evaluate_sol.py can compare results directly.
+
+Resume: by default, skips a fold when ``fold_<NN>/finetune_results.json`` and
+``hypnograms.json`` already exist. Use ``--force`` to re-run those folds.
 """
 
 from __future__ import annotations
@@ -384,6 +387,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--folds", nargs="+", type=int, default=d["folds"],
         help="Specific fold indices to fine-tune (default: all).",
     )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-run folds even if fold_<NN>/ already has finetune_results.json and hypnograms.json.",
+    )
     return p
 
 
@@ -406,6 +414,7 @@ def main(args: argparse.Namespace) -> None:
         "lr / epochs":     f"{args.lr} / {args.epochs}",
         "patience":        args.patience,
         "folds":           args.folds or "all",
+        "force":           args.force,
     })
 
     # ---- Validate ----
@@ -465,6 +474,19 @@ def main(args: argparse.Namespace) -> None:
     for fold_dir, fold_idx in sorted(fold_dir_to_idx.items(), key=lambda x: x[1]):
         if fold_idx not in effective:
             continue
+        fold_out = os.path.join(resolved_out, f"fold_{fold_idx:02d}")
+        done_json = os.path.join(fold_out, "finetune_results.json")
+        done_hyp  = os.path.join(fold_out, "hypnograms.json")
+        if (
+            not args.force
+            and os.path.isfile(done_json)
+            and os.path.isfile(done_hyp)
+        ):
+            print(f"  [Fold {fold_idx}] already complete → {fold_out}")
+            with open(done_json) as f:
+                all_results.append(json.load(f))
+            continue
+
         test_fold = all_folds[fold_idx]
         other     = [r for r in all_records if r not in test_fold]
         random.seed(2019 + fold_idx)
