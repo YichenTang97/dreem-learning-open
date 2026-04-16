@@ -144,6 +144,9 @@ class PerChannelCNN(nn.Module):
         -------
         Tensor  (N, out_features)
         """
+        # Some normalization paths can yield float64 tensors; Conv1d weights are float32.
+        # Cast once at the encoder boundary to avoid runtime dtype mismatches on GPU/CPU.
+        x = x.float()
         return self.net(x).squeeze(-1)   # (N, out_features)
 
 
@@ -291,6 +294,7 @@ class CNNMaxPoolEpochEncoder(EpochEncoder):
             The trailing dimension is the *channel* axis that the downstream
             PoolReducer will max-pool over.
         """
+        x = x.float()
         batch, tc, n_ch, sig_len = x.size()
 
         # Merge batch × TC × channels so the CNN processes every channel of
