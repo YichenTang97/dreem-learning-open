@@ -21,6 +21,8 @@ import sys
 # Make sure the package root is importable regardless of where the script is
 # invoked from.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+from typing import Optional
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
@@ -65,6 +67,14 @@ SOL_RESULTS_DIR = os.path.join(SOL_DIR, "results")
 
 #: Where the CNN-RNN config JSONs live.
 CNN_RNN_CONFIGS_DIR = os.path.join(SOL_DIR, "configs", "cnn_rnn")
+
+#: Root of the dreem-learning-evaluation submodule (added via git submodule add).
+#: Set to None if the submodule has not been initialised yet; compute_sol_targets.py
+#: will warn the user rather than crash.
+_EVAL_REPO_CANDIDATE = os.path.join(_REPO_ROOT, "dreem-learning-evaluation")
+EVAL_REPO_DIR: Optional[str] = (
+    _EVAL_REPO_CANDIDATE if os.path.isdir(_EVAL_REPO_CANDIDATE) else None
+)
 
 # ---------------------------------------------------------------------------
 # Dataset shortcuts  (map dataset name → dreem settings dict)
