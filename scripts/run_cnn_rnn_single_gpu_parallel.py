@@ -1,19 +1,19 @@
 """
-Run CNN-RNN (sol_experiments/train_cnn_rnn.py) LOOCV folds on a single GPU with
+Run CNN-RNN (``scripts/run_cnn_rnn.py``) LOOCV folds on a single GPU with
 configurable worker count.
 
 Mirrors ``scripts/run_simple_sleep_net_single_gpu_parallel.py``:
 - retries in rounds until all folds complete (or --max-rounds)
 - bootstraps memmaps with a single fold when cache is missing
-- re-indexes runs via ``scripts/index_experiments.py`` each round
+- re-indexes runs via ``scripts/experiment_utils/index_experiments.py`` each round
 - streams worker logs to files and stdout
 
 Usage:
-    python sol_experiments/run_cnn_rnn_single_gpu_parallel.py --workers 3
+    python scripts/run_cnn_rnn_single_gpu_parallel.py --workers 3
 
 Examples:
-    python sol_experiments/run_cnn_rnn_single_gpu_parallel.py --workers 2 --dataset dodh
-    python sol_experiments/run_cnn_rnn_single_gpu_parallel.py --workers 4 --cuda-device 1 --dataset dodo
+    python scripts/run_cnn_rnn_single_gpu_parallel.py --workers 2 --dataset dodh
+    python scripts/run_cnn_rnn_single_gpu_parallel.py --workers 4 --cuda-device 1 --dataset dodo
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ from typing import List, Tuple
 from dreem_learning_open.settings import DODO_SETTINGS, DODH_SETTINGS, EXPERIMENTS_DIRECTORY
 
 ALGO = "cnn_rnn"
-CONFIG_ROOT = os.path.join("sol_experiments", "configs", ALGO)
+CONFIG_ROOT = os.path.join("scripts", "base_experiments", ALGO)
 
 DATASET_SETTINGS = {
     "dodh": DODH_SETTINGS,
@@ -163,7 +163,7 @@ def run_workers(
     for worker_id, folds in enumerate(batches):
         cmd = [
             python_exec,
-            os.path.join("sol_experiments", "train_cnn_rnn.py"),
+            os.path.join("scripts", "run_cnn_rnn.py"),
             "--dataset",
             dataset,
             "--folds",
@@ -231,12 +231,12 @@ def main() -> int:
     parser.add_argument(
         "--out-dir",
         default=None,
-        help="Override experiment output dir (forwarded to train_cnn_rnn.py and indexing)",
+        help="Override experiment output dir (forwarded to run_cnn_rnn.py and indexing)",
     )
     parser.add_argument(
         "--rebuild-memmaps",
         action="store_true",
-        help="Pass --rebuild-memmaps to the bootstrap train_cnn_rnn.py run only",
+        help="Pass --rebuild-memmaps to the bootstrap run_cnn_rnn.py run only",
     )
     args = parser.parse_args()
 
@@ -261,7 +261,7 @@ def main() -> int:
             print("Memmaps not ready -> bootstrap fold {}".format(bootstrap_fold))
             bootstrap_cmd = [
                 args.python_exec,
-                os.path.join("sol_experiments", "train_cnn_rnn.py"),
+                os.path.join("scripts", "run_cnn_rnn.py"),
                 "--dataset",
                 args.dataset,
                 "--folds",
@@ -283,13 +283,13 @@ def main() -> int:
 
         index_cmd = [
             args.python_exec,
-            "scripts/index_experiments.py",
+            "scripts/experiment_utils/index_experiments.py",
             "--dataset",
             args.dataset,
             "--algo",
             ALGO,
             "--base-experiments-dir",
-            os.path.join("sol_experiments", "configs"),
+            os.path.join("scripts", "base_experiments"),
             "--metric",
             args.metric,
             "--runs-root",

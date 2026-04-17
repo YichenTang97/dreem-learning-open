@@ -232,7 +232,7 @@ def main() -> int:
         # Refresh completion index from run folders.
         index_cmd = [
             args.python_exec,
-            "scripts/index_experiments.py",
+            "scripts/experiment_utils/index_experiments.py",
             "--metric",
             args.metric,
         ]

@@ -14,10 +14,10 @@ subject to ``--keep-last``.
 Default mode is dry-run (no deletion). Use ``--apply`` to actually remove folders.
 
 Examples:
-  python scripts/cleanup_incomplete_experiments.py
-  python scripts/cleanup_incomplete_experiments.py --apply
-  python scripts/cleanup_incomplete_experiments.py --dataset dodh --algo simple_sleep_net --apply
-  python scripts/cleanup_incomplete_experiments.py --all-incomplete --apply
+  python scripts/experiment_utils/cleanup_incomplete_experiments.py
+  python scripts/experiment_utils/cleanup_incomplete_experiments.py --apply
+  python scripts/experiment_utils/cleanup_incomplete_experiments.py --dataset dodh --algo simple_sleep_net --apply
+  python scripts/experiment_utils/cleanup_incomplete_experiments.py --all-incomplete --apply
 """
 import argparse
 import json

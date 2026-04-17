@@ -1,16 +1,22 @@
 """
 sol_config.py
 =============
-Central configuration for all SOL experiment scripts.
+Central configuration for SOL (Sleep Onset Latency) experiment scripts.
 
-All scripts import their default paths and hyperparameters from here so that:
-  - Running `python sol_experiments/<script>.py` with no args just works.
-  - Settings from the main project (settings.py) are the single source of truth
-    for data/experiment directories.
-  - Changing a path or hyperparameter in one place propagates everywhere.
+Staging **pretraining** (under ``scripts/``) uses **consensus** hypnogram labels.
+That is not the same supervision as **SOL** derived from expert scorers. The
+``sol_experiments`` pipeline is **model-agnostic**: any folder name under
+``EXPERIMENTS_DIRECTORY/<dataset>/<model>/`` can be evaluated, fine-tuned on SOL,
+and re-evaluated.
 
-Override any value at the command line if needed — every script exposes its
-full parameter set via argparse.
+**Leave-one-subject-out (LOOCV)** matches pretraining: one held-out test record
+per fold. SOL **targets** are dataset-wide (every record has a reference SOL).
+SOL **evaluations** and **finetuned** artifacts are stored **per fold** under
+``SOL_DIRECTORY`` (see ``sol_eval_model_root``, ``sol_eval_fold_dir``,
+``finetune_dir``).
+
+Paths come from ``dreem_learning_open.settings`` (``BASE_DIRECTORY``,
+``REPO_ROOT``, ``SOL_DIRECTORY``, ``EXPERIMENTS_DIRECTORY``).
 """
 
 from __future__ import annotations
@@ -18,24 +24,26 @@ from __future__ import annotations
 import os
 import sys
 
-# Make sure the package root is importable regardless of where the script is
-# invoked from.
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
 from typing import Optional
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
+
+_REPO_ROOT_FOR_IMPORT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT_FOR_IMPORT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT_FOR_IMPORT)
 
 try:
     from dreem_learning_open.settings import (
-        DODH_SETTINGS,
+        BASE_DIRECTORY,
         DODO_SETTINGS,
+        DODH_SETTINGS,
         EXPERIMENTS_DIRECTORY,
+        REPO_ROOT,
+        SOL_DIRECTORY,
     )
 except ModuleNotFoundError:
-    # settings.py has not been created yet — give a clear actionable message.
     import textwrap
-    _msg = textwrap.dedent("""
+
+    _msg = textwrap.dedent(
+        """
         ┌─────────────────────────────────────────────────────────────┐
         │  SETUP REQUIRED: create settings.py before running scripts  │
         │                                                             │
@@ -43,41 +51,89 @@ except ModuleNotFoundError:
         │       cp dreem_learning_open/settings_template.py           │
         │          dreem_learning_open/settings.py                    │
         │                                                             │
-        │  2. Edit settings.py and set BASE_DIRECTORY to the folder   │
+        │  2. Edit settings.py and set BASE_DIRECTORY to the folder │
         │     where you want data, memmaps and experiments stored.    │
         │                                                             │
         │  3. Re-run your script.                                     │
         └─────────────────────────────────────────────────────────────┘
-    """).strip()
+    """
+    ).strip()
     print(_msg)
     raise SystemExit(1)
 
 # ---------------------------------------------------------------------------
-# Directory layout
+# Package / repo paths
 # ---------------------------------------------------------------------------
 
-#: Absolute path to the sol_experiments/ folder itself.
 SOL_DIR = os.path.dirname(os.path.abspath(__file__))
 
-#: Where SOL target JSON files are written by compute_sol_targets.py.
-SOL_DATA_DIR = os.path.join(SOL_DIR, "data")
+#: CNN-RNN **pretraining** configs (not SOL-specific); lives under scripts/base_experiments.
+CNN_RNN_CONFIGS_DIR = os.path.join(REPO_ROOT, "scripts", "base_experiments", "cnn_rnn")
 
-#: Where SOL evaluation result JSON files are written by evaluate_sol.py.
-SOL_RESULTS_DIR = os.path.join(SOL_DIR, "results")
-
-#: Where the CNN-RNN config JSONs live.
-CNN_RNN_CONFIGS_DIR = os.path.join(SOL_DIR, "configs", "cnn_rnn")
-
-#: Root of the dreem-learning-evaluation submodule (added via git submodule add).
-#: Set to None if the submodule has not been initialised yet; compute_sol_targets.py
-#: will warn the user rather than crash.
-_EVAL_REPO_CANDIDATE = os.path.join(_REPO_ROOT, "dreem-learning-evaluation")
+_EVAL_REPO_CANDIDATE = os.path.join(REPO_ROOT, "dreem-learning-evaluation")
 EVAL_REPO_DIR: Optional[str] = (
     _EVAL_REPO_CANDIDATE if os.path.isdir(_EVAL_REPO_CANDIDATE) else None
 )
 
 # ---------------------------------------------------------------------------
-# Dataset shortcuts  (map dataset name → dreem settings dict)
+# SOL artifact roots under BASE_DIRECTORY/sol/
+# ---------------------------------------------------------------------------
+
+SOL_TARGETS_ROOT = os.path.join(SOL_DIRECTORY, "targets")
+SOL_EVALUATIONS_ROOT = os.path.join(SOL_DIRECTORY, "evaluations")
+SOL_FINETUNED_ROOT = os.path.join(SOL_DIRECTORY, "finetuned")
+BASE_DIRECTORY_ABS = os.path.abspath(BASE_DIRECTORY)
+
+
+def sol_targets_path(dataset: str = "dodh") -> str:
+    """Dataset-wide expert SOL reference JSON (all records)."""
+    d = os.path.join(SOL_TARGETS_ROOT, dataset)
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, "sol_targets.json")
+
+
+def sol_eval_model_root(dataset: str, model: str) -> str:
+    """Root directory for per-fold SOL evaluation outputs for one pretrained model."""
+    p = os.path.join(SOL_EVALUATIONS_ROOT, dataset, model)
+    os.makedirs(p, exist_ok=True)
+    return p
+
+
+def sol_eval_fold_dir(dataset: str, model: str, fold_idx: int) -> str:
+    """Per-fold LOSO evaluation directory (``fold_XX`` matches finetune_sol)."""
+    p = os.path.join(sol_eval_model_root(dataset, model), "fold_{:02d}".format(fold_idx))
+    os.makedirs(p, exist_ok=True)
+    return p
+
+
+def sol_eval_summary_path(dataset: str, model: str) -> str:
+    """Optional rollup JSON aggregating all folds for one model."""
+    return os.path.join(sol_eval_model_root(dataset, model), "summary.json")
+
+
+def exp_dir(dataset: str = "dodh", model: str = "cnn_rnn") -> str:
+    """Pretrained experiment directory (LOOCV UUID folders live here)."""
+    return os.path.join(EXPERIMENTS_DIRECTORY, dataset, model)
+
+
+def finetune_dir(
+    dataset: str = "dodh",
+    base_model: str = "cnn_rnn",
+    cutoff_minutes: float = 10.0,
+    alpha: float = 0.5,
+) -> str:
+    """
+    Root directory for SOL fine-tuning outputs (contains ``fold_XX/`` per LOSO fold).
+    Lives under ``SOL_DIRECTORY/finetuned``, not under EXPERIMENTS_DIRECTORY.
+    """
+    tag = "ft_c{:.0f}m_a{:.2f}".format(cutoff_minutes, alpha)
+    p = os.path.join(SOL_FINETUNED_ROOT, dataset, "{}_{}".format(base_model, tag))
+    os.makedirs(p, exist_ok=True)
+    return p
+
+
+# ---------------------------------------------------------------------------
+# Dataset shortcuts
 # ---------------------------------------------------------------------------
 
 DATASET_SETTINGS: dict = {
@@ -85,90 +141,64 @@ DATASET_SETTINGS: dict = {
     "dodo": DODO_SETTINGS,
 }
 
-# ---------------------------------------------------------------------------
-# Per-dataset default paths
-# ---------------------------------------------------------------------------
 
 def h5_dir(dataset: str = "dodh") -> str:
-    """Return the h5 directory for *dataset* (from project settings)."""
     return DATASET_SETTINGS[dataset]["h5_directory"]
 
 
-def sol_targets_path(dataset: str = "dodh") -> str:
-    """Standard output path for compute_sol_targets.py."""
-    os.makedirs(SOL_DATA_DIR, exist_ok=True)
-    return os.path.join(SOL_DATA_DIR, f"sol_targets_{dataset}.json")
-
-
-def exp_dir(dataset: str = "dodh", model: str = "cnn_rnn") -> str:
-    """Experiment directory for *model* on *dataset* (inside EXPERIMENTS_DIRECTORY)."""
-    return os.path.join(EXPERIMENTS_DIRECTORY, dataset, model)
-
-
-def sol_results_path(dataset: str = "dodh", model: str = "cnn_rnn",
-                     tag: str = "") -> str:
-    """Standard path for an evaluate_sol.py output JSON."""
-    os.makedirs(SOL_RESULTS_DIR, exist_ok=True)
-    suffix = f"_{tag}" if tag else ""
-    return os.path.join(SOL_RESULTS_DIR, f"sol_{model}_{dataset}{suffix}.json")
-
-
-def finetune_dir(dataset: str = "dodh", base_model: str = "cnn_rnn",
-                 cutoff_minutes: float = 10.0, alpha: float = 0.5) -> str:
+def to_base_directory_relative(path: str) -> str:
     """
-    Standard output directory for a fine-tuned model.
-    Name encodes the key hyperparameters so multiple runs don't overwrite.
+    Return `path` in repo-style ``data/...`` form when possible.
+    If the path is outside BASE_DIRECTORY (or cannot be relativized),
+    return it unchanged.
     """
-    tag = f"ft_c{cutoff_minutes:.0f}m_a{alpha:.2f}"
-    return os.path.join(EXPERIMENTS_DIRECTORY, dataset, f"{base_model}_{tag}")
+    if not path:
+        return path
+    abs_path = os.path.abspath(path)
+    try:
+        if os.path.commonpath([BASE_DIRECTORY_ABS, abs_path]) == BASE_DIRECTORY_ABS:
+            rel_from_data = os.path.relpath(abs_path, BASE_DIRECTORY_ABS).replace("\\", "/")
+            return "data/{}".format(rel_from_data)
+    except ValueError:
+        # Different drive letters on Windows can raise ValueError.
+        return path
+    return path
 
 
-# ---------------------------------------------------------------------------
-# Default hyperparameters
-# ---------------------------------------------------------------------------
-
-#: CNN-RNN training defaults.
 TRAIN_DEFAULTS: dict = {
-    "dataset":  "dodh",
-    "folds":    None,      # None = run all LOOCV folds
+    "dataset": "dodh",
+    "folds": None,
 }
 
-#: SOL fine-tuning defaults (all exposed as CLI args).
 FINETUNE_DEFAULTS: dict = {
-    "dataset":         "dodh",
-    "base_model":      "cnn_rnn",
-    "cutoff_minutes":  10.0,   # minutes after true SOL to include in training window
-    "alpha":           0.5,    # weight of CE loss; (1-alpha) = SOL loss weight
-    "lr":              1e-4,
-    "epochs":          30,
-    "patience":        7,
-    "folds":           None,   # None = all folds
+    "dataset": "dodh",
+    "base_model": "cnn_rnn",
+    "cutoff_minutes": 10.0,
+    "alpha": 0.5,
+    "lr": 1e-4,
+    "epochs": 30,
+    "patience": 7,
+    "folds": None,
 }
 
-#: SOL evaluation defaults.
 EVALUATE_DEFAULTS: dict = {
-    "dataset":              "dodh",
-    "model":                "cnn_rnn",
-    "require_consecutive":  1,
+    "dataset": "dodh",
+    "model": "cnn_rnn",
+    "require_consecutive": 1,
 }
 
-#: SOL target extraction defaults.
 TARGETS_DEFAULTS: dict = {
-    "dataset":              "dodh",
-    "require_consecutive":  1,
-    "inspect_first":        False,
+    "dataset": "dodh",
+    "require_consecutive": 1,
+    "inspect_first": False,
 }
 
-# ---------------------------------------------------------------------------
-# Convenience printer (called by each script at startup)
-# ---------------------------------------------------------------------------
 
 def print_config(script_name: str, params: dict) -> None:
-    """Pretty-print the resolved configuration for a script run."""
     width = 60
-    print(f"\n{'='*width}")
-    print(f"  {script_name}")
-    print(f"{'='*width}")
+    print("\n{}".format("=" * width))
+    print("  {}".format(script_name))
+    print("{}".format("=" * width))
     for k, v in params.items():
-        print(f"  {k:<26}: {v}")
-    print(f"{'='*width}\n")
+        print("  {:<26}: {}".format(k, v))
+    print("{}\n".format("=" * width))

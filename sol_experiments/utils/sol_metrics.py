@@ -277,6 +277,7 @@ def extract_consensus_sol(sol_targets: Dict[str, Dict]) -> Dict[str, Optional[fl
     return {
         rid: info.get("consensus_sol_min")
         for rid, info in sol_targets.items()
+        if isinstance(info, dict) and not rid.startswith("_")
     }
 
 

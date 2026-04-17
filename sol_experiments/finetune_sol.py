@@ -1,9 +1,12 @@
 """
 finetune_sol.py  —  Script 4
 ==============================
-Fine-tune a pretrained ModuloNet with a combined staging + SOL loss.
+Fine-tune a **pretrained** ModuloNet (any ``--base_model`` folder under
+``EXPERIMENTS_DIRECTORY/<dataset>/``) with a combined staging + SOL loss.
+Uses the same **LOOCV** folds as pretraining; outputs live under
+``BASE_DIRECTORY/sol/finetuned/.../fold_XX/``.
 
-Minimal usage (fine-tunes CNN-RNN on DODH, 10 min cutoff, alpha=0.5):
+Minimal usage (default base_model CNN-RNN on DODH, 10 min cutoff, alpha=0.5):
     python sol_experiments/finetune_sol.py
 
 Custom usage:
@@ -54,6 +57,7 @@ from sol_experiments.sol_config import (
     finetune_dir as default_finetune_dir,
     sol_targets_path as default_targets_path,
     print_config,
+    to_base_directory_relative,
 )
 from sol_experiments.utils.sol_metrics import (
     load_sol_targets,
@@ -298,7 +302,8 @@ def finetune_fold(
     net.save(os.path.join(fold_dir, "finetuned_model.gz"))
 
     result = {
-        "fold_idx": fold_idx, "base_fold_dir": base_fold_dir,
+        "fold_idx": fold_idx,
+        "base_fold_dir": to_base_directory_relative(base_fold_dir),
         "best_val_mae": round(best_val_mae, 3),
         "test_sol_metrics": test_metrics, "training_history": history,
     }
@@ -365,12 +370,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--sol_targets", default=None,
         help="Path to sol_targets.json. "
-             "Default: sol_experiments/data/sol_targets_<dataset>.json",
+             "Default: BASE_DIRECTORY/sol/targets/<dataset>/sol_targets.json",
     )
     p.add_argument(
         "--out_dir", default=None,
-        help="Output directory for fine-tuned models/results. "
-             "Default: EXPERIMENTS_DIRECTORY/<dataset>/<base_model>_ft_c<C>m_a<A>/",
+        help="Output directory root for fine-tuned fold_XX/ trees. "
+             "Default: BASE_DIRECTORY/sol/finetuned/<dataset>/<base_model>_ft_c<C>m_a<A>/",
     )
     p.add_argument(
         "--cutoff_minutes", type=float, default=d["cutoff_minutes"],
@@ -420,7 +425,7 @@ def main(args: argparse.Namespace) -> None:
     # ---- Validate ----
     if not os.path.isdir(resolved_base):
         print(f"ERROR: base_exp_dir not found: {resolved_base}")
-        print("  Run train_cnn_rnn.py (or run_base_experiments.py) first.")
+        print("  Run scripts/run_cnn_rnn.py (or run_base_experiments.py) first.")
         sys.exit(1)
     if not os.path.exists(resolved_sol):
         print(f"ERROR: sol_targets not found: {resolved_sol}")

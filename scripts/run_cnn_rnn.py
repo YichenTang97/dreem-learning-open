@@ -1,6 +1,6 @@
 """
-train_cnn_rnn.py  —  Script 2
-==============================
+run_cnn_rnn.py
+==============
 Train the proposed CNN-RNN model (CNNMaxPoolEpochEncoder + unidirectional LSTM)
 on a Dreem dataset using Leave-One-Out Cross-Validation (LOOCV), matching the
 evaluation protocol used for SimpleSleepNet in run_base_experiments.py.
@@ -16,11 +16,11 @@ Resume semantics match ``dreem_learning_open.utils.run_experiments`` /
   (same as ``--reuse-incomplete-uuids``), unless ``--no-reuse-incomplete-uuids``
   or ``--force``.
 
-Minimal usage (all paths/settings resolved automatically):
-    python sol_experiments/train_cnn_rnn.py
+Minimal usage (from repository root):
+    python scripts/run_cnn_rnn.py
 
 Custom usage:
-    python sol_experiments/train_cnn_rnn.py \\
+    python scripts/run_cnn_rnn.py \\
         --dataset dodo \\
         --folds 0 1 2 \\
         --out_dir /custom/experiment/dir/
@@ -270,7 +270,7 @@ def main(args: argparse.Namespace) -> None:
         print(f"  --force: removing {out_dir}")
         shutil.rmtree(out_dir)
 
-    print_config("train_cnn_rnn.py", {
+    print_config("run_cnn_rnn.py", {
         "dataset":    args.dataset,
         "out_dir":    out_dir,
         "folds":      args.folds or "all",

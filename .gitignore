@@ -14,10 +14,6 @@ settings.py
 # Local datasets (H5, memmaps, experiments, results)
 data/
 
-# Generated SOL targets and evaluation results (produced by sol_experiments scripts)
-sol_experiments/data/
-sol_experiments/results/
-
 # Distribution / packaging
 .Python
 env/

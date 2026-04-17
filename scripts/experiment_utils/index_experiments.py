@@ -14,11 +14,11 @@ and ``records_split`` are all non-null with non-empty content (LOOV: exactly one
 runs still count as pending for ``run_*_parallel`` until outputs exist.
 
 Usage:
-    python scripts/index_experiments.py
-    python scripts/index_experiments.py --metric cohen_kappa
-    python scripts/index_experiments.py --dataset dodh --algo simple_sleep_net
-    python scripts/index_experiments.py --dataset dodh --algo cnn_rnn \\
-        --base-experiments-dir sol_experiments/configs
+    python scripts/experiment_utils/index_experiments.py
+    python scripts/experiment_utils/index_experiments.py --metric cohen_kappa
+    python scripts/experiment_utils/index_experiments.py --dataset dodh --algo simple_sleep_net
+    python scripts/experiment_utils/index_experiments.py --dataset dodh --algo cnn_rnn \\
+        --base-experiments-dir scripts/base_experiments
 """
 import argparse
 import csv

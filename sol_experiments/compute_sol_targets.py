@@ -26,6 +26,10 @@ behaviour (but note the 2-epoch index offset, i.e. subtract 1 min).
 
 Consensus SOL = mean( SOL_scorer_1, ..., SOL_scorer_5 )
 
+**Expert reference (dataset-wide):** output is one JSON with a row per record.
+LOSOCV fold membership for model evaluation comes from pretraining
+(``experiment_fold_index`` / ``index_experiments``), not from this file.
+
 Minimal usage (uses submodule by default):
     python sol_experiments/compute_sol_targets.py
 
@@ -52,6 +56,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from sol_experiments.sol_config import (
     h5_dir as default_h5_dir,
     sol_targets_path as default_targets_path,
+    to_base_directory_relative,
     TARGETS_DEFAULTS,
     EVAL_REPO_DIR,
     print_config,
@@ -143,7 +148,7 @@ def process_record(
     record_id = os.path.splitext(os.path.basename(h5_path))[0]
     result: Dict = {
         "record_id":           record_id,
-        "h5_path":             h5_path,
+        "h5_path":             to_base_directory_relative(h5_path),
         "source":              None,
         "n_scorers":           0,
         "scorer_keys_used":    [],
@@ -300,7 +305,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--out", default=None,
         help="Output JSON path. "
-             "Default: sol_experiments/data/sol_targets_{dataset}.json",
+             "Default: BASE_DIRECTORY/sol/targets/<dataset>/sol_targets.json",
     )
     p.add_argument(
         "--require_consecutive", type=int,
@@ -400,8 +405,18 @@ def main(args: argparse.Namespace) -> None:
     print_summary(records_data)
 
     os.makedirs(os.path.dirname(os.path.abspath(resolved_out)), exist_ok=True)
+    out_payload = {r["record_id"]: r for r in records_data}
+    out_payload["_meta"] = {
+        "description": (
+            "Expert-derived SOL reference per record (dataset-wide). "
+            "Use with LOSO fold indices from pretraining when evaluating models."
+        ),
+        "dataset": args.dataset,
+        "require_consecutive": args.require_consecutive,
+        "n_records": len(records_data),
+    }
     with open(resolved_out, "w") as f:
-        json.dump({r["record_id"]: r for r in records_data}, f, indent=2)
+        json.dump(out_payload, f, indent=2)
     print(f"Saved → {resolved_out}\n")
 
 

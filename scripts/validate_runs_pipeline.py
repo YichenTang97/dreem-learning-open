@@ -30,7 +30,7 @@ Examples:
   python scripts/validate_runs_pipeline.py -y
   python scripts/validate_runs_pipeline.py --resync
   python scripts/validate_runs_pipeline.py --dataset dodh --algo cnn_rnn \\
-      --base-experiments-dir sol_experiments/configs
+      --base-experiments-dir scripts/base_experiments
   python scripts/validate_runs_pipeline.py --skip-rclone --yes
 """
 from __future__ import annotations
@@ -44,11 +44,12 @@ import subprocess
 import sys
 from typing import List, Optional, Tuple
 
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, os.pardir))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from dreem_learning_open.settings import EXPERIMENTS_DIRECTORY
+from dreem_learning_open.settings import EXPERIMENTS_DIRECTORY, REPO_ROOT
 
 SUMMARY_LINE_RE = re.compile(
     r"Summary:\s*ok=(\d+)\s+dry_run=(\d+)\s+skipped=(\d+)\s+no_completed_best_model=(\d+)\s+errors=(\d+)"
@@ -270,7 +271,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--repo-root",
-        default=_REPO_ROOT,
+        default=REPO_ROOT,
         help="Repository root (recover path resolution)",
     )
     parser.add_argument(
@@ -324,9 +325,10 @@ def main() -> int:
     )
 
     env = _subprocess_env(repo_root)
-    recover_script = os.path.join(repo_root, "scripts", "recover_final_validation_dump.py")
-    cleanup_script = os.path.join(repo_root, "scripts", "cleanup_incomplete_experiments.py")
-    index_script = os.path.join(repo_root, "scripts", "index_experiments.py")
+    _eu = os.path.join(repo_root, "scripts", "experiment_utils")
+    recover_script = os.path.join(_eu, "recover_final_validation_dump.py")
+    cleanup_script = os.path.join(_eu, "cleanup_incomplete_experiments.py")
+    index_script = os.path.join(_eu, "index_experiments.py")
     use_resync = bool(args.resync)
 
     # --- 1. Rclone (local data/  <->  r2:.../dreem/data only) ---

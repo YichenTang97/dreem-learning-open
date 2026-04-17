@@ -19,12 +19,12 @@ remote restore if needed).
 This script does not call rclone.
 
 Examples:
-  python scripts/audit_experiment_artifacts.py
-  python scripts/audit_experiment_artifacts.py --dataset dodh --algo cnn_rnn
-  python scripts/audit_experiment_artifacts.py --runs-root D:/data/experiments/dodh/cnn_rnn
-  python scripts/audit_experiment_artifacts.py --json-out audit.json
-  python scripts/audit_experiment_artifacts.py --core-detail
-  python scripts/audit_experiment_artifacts.py --fix --apply
+  python scripts/experiment_utils/audit_experiment_artifacts.py
+  python scripts/experiment_utils/audit_experiment_artifacts.py --dataset dodh --algo cnn_rnn
+  python scripts/experiment_utils/audit_experiment_artifacts.py --runs-root D:/data/experiments/dodh/cnn_rnn
+  python scripts/experiment_utils/audit_experiment_artifacts.py --json-out audit.json
+  python scripts/experiment_utils/audit_experiment_artifacts.py --core-detail
+  python scripts/experiment_utils/audit_experiment_artifacts.py --fix --apply
 """
 from __future__ import annotations
 
@@ -35,7 +35,8 @@ import sys
 import tarfile
 from typing import Any, Dict, List, Optional, Tuple
 
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, os.pardir, os.pardir))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 

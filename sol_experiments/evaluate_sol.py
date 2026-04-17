@@ -1,11 +1,14 @@
 """
 evaluate_sol.py  —  Script 3
 ==============================
-Evaluate any trained staging model's LOOCV outputs on SOL estimation.
-Works on the hypnograms.json files produced by run_base_experiments.py
-(SimpleSleepNet etc.) and train_cnn_rnn.py.
+Evaluate any **pretrained** staging model's **LOOCV** outputs on **SOL estimation**
+(vs expert-derived targets from ``compute_sol_targets.py``). Staging was trained
+on **consensus** labels; this step scores **SOL** against per-scorer / consensus
+reference, **per held-out fold** (same leave-one-subject-out split as pretraining).
 
-Minimal usage (evaluates CNN-RNN on DODH):
+Works on ``hypnograms.json`` under each run UUID in ``EXPERIMENTS_DIRECTORY``.
+
+Minimal usage:
     python sol_experiments/evaluate_sol.py
 
 Custom usage:
@@ -13,17 +16,13 @@ Custom usage:
         --model simple_sleep_net \\
         --dataset dodh \\
         --exp_dir /custom/experiment/dir/ \\
-        --sol_targets /custom/sol_targets.json \\
-        --out /custom/results.json \\
-        --require_consecutive 2
+        --base-experiments-dir scripts/base_experiments
 
-Available model names (matching the experiment folder names):
-    cnn_rnn              ← our proposed model (default)
-    simple_sleep_net     ← SimpleSleepNet baseline (Guillot et al. 2020)
-    chambon_et_al        ← Chambon et al. baseline
-    deep_sleep_net       ← DeepSleepNet baseline
-    tsinalis_et_al       ← Tsinalis et al. baseline
-    (any folder name under EXPERIMENTS_DIRECTORY/<dataset>/)
+**Outputs** (under ``BASE_DIRECTORY/sol/evaluations/<dataset>/<model>/``):
+  - ``fold_XX/sol_eval.json`` — metrics for that LOSO fold
+  - ``summary.json`` — rollup across folds (unless ``--out`` overrides summary path)
+
+Available ``--model`` values are folder names under ``EXPERIMENTS_DIRECTORY/<dataset>/``.
 """
 
 from __future__ import annotations
@@ -32,33 +31,36 @@ import argparse
 import json
 import os
 import sys
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from sklearn.metrics import f1_score
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from dreem_learning_open.settings import REPO_ROOT
+from dreem_learning_open.utils.experiment_fold_index import (
+    build_loov_fold_map,
+    load_memmap_description,
+    recover_test_record_and_fold_idx,
+)
 from sol_experiments.sol_config import (
     DATASET_SETTINGS,
     EVALUATE_DEFAULTS,
     exp_dir as default_exp_dir,
-    sol_targets_path as default_targets_path,
-    sol_results_path as default_results_path,
     print_config,
+    sol_eval_fold_dir,
+    sol_eval_summary_path,
+    sol_targets_path as default_targets_path,
+    to_base_directory_relative,
 )
 from sol_experiments.utils.sol_metrics import (
-    compute_sol,
     compute_sol_metrics,
-    load_sol_targets,
     extract_consensus_sol,
+    load_sol_targets,
     sol_from_hypnograms_json,
 )
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def find_hypnogram_files(exp_dir: str) -> List[str]:
     """Recursively find all hypnograms.json under exp_dir (one per LOOCV fold)."""
@@ -70,20 +72,24 @@ def find_hypnogram_files(exp_dir: str) -> List[str]:
 
 
 def n1_f1_from_hypnograms(hyp_path: str) -> Dict[str, Optional[float]]:
-    """Per-record N1 F1-score from a hypnograms.json file."""
     with open(hyp_path) as f:
         data = json.load(f)
     results = {}
     for rid, hyps in data.items():
         pred = np.array(hyps["predicted"], dtype=int)
-        true = np.array(hyps["target"],    dtype=int)
+        true = np.array(hyps["target"], dtype=int)
         mask = true >= 0
         if mask.sum() == 0:
             results[rid] = None
             continue
         try:
-            f1 = f1_score(true[mask], pred[mask], labels=[1],
-                          average="macro", zero_division=0)
+            f1 = f1_score(
+                true[mask],
+                pred[mask],
+                labels=[1],
+                average="macro",
+                zero_division=0,
+            )
             results[rid] = round(float(f1), 4)
         except Exception:
             results[rid] = None
@@ -91,54 +97,78 @@ def n1_f1_from_hypnograms(hyp_path: str) -> Dict[str, Optional[float]]:
 
 
 def mean_staging_accuracy(hyp_path: str) -> Optional[float]:
-    """Mean per-record staging accuracy from a hypnograms.json file."""
     with open(hyp_path) as f:
         data = json.load(f)
     accs = []
     for hyps in data.values():
         pred = np.array(hyps["predicted"], dtype=int)
-        true = np.array(hyps["target"],    dtype=int)
+        true = np.array(hyps["target"], dtype=int)
         mask = true >= 0
         if mask.sum():
             accs.append((pred[mask] == true[mask]).mean())
     return float(np.mean(accs)) if accs else None
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+def _expert_interrater_summary(sol_targets: Dict) -> Optional[Dict[str, float]]:
+    """Mean inter-rater SD (minutes) when present in target records."""
+    stds = []
+    for rec in sol_targets.values():
+        if not isinstance(rec, dict):
+            continue
+        v = rec.get("interrater_std_min")
+        if v is not None and isinstance(v, (int, float)) and not np.isnan(v):
+            stds.append(float(v))
+    if not stds:
+        return None
+    return {
+        "mean_interrater_std_min": float(np.mean(stds)),
+        "n_records_with_std": len(stds),
+    }
+
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Evaluate a trained sleep staging model on SOL estimation.",
+        description=(
+            "LOSOCV SOL evaluation: model hypnograms vs expert SOL reference, "
+            "one artifact tree per fold under BASE_DIRECTORY/sol/evaluations/."
+        ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument(
-        "--model", default=EVALUATE_DEFAULTS["model"],
-        help="Model name (= experiment sub-folder under EXPERIMENTS_DIRECTORY/<dataset>/).",
+        "--model",
+        default=EVALUATE_DEFAULTS["model"],
+        help="Experiment folder name under EXPERIMENTS_DIRECTORY/<dataset>/.",
     )
     p.add_argument(
-        "--dataset", default=EVALUATE_DEFAULTS["dataset"],
+        "--dataset",
+        default=EVALUATE_DEFAULTS["dataset"],
         choices=list(DATASET_SETTINGS.keys()),
-        help="Dataset the model was trained on.",
     )
     p.add_argument(
-        "--exp_dir", default=None,
-        help="Path to the model's experiment folder containing fold sub-dirs. "
-             "Default: EXPERIMENTS_DIRECTORY/<dataset>/<model>/",
+        "--exp_dir",
+        default=None,
+        help="Pretrained experiment root (UUID run dirs). "
+        "Default: EXPERIMENTS_DIRECTORY/<dataset>/<model>/",
     )
     p.add_argument(
-        "--sol_targets", default=None,
-        help="Path to sol_targets.json from compute_sol_targets.py. "
-             "Default: sol_experiments/data/sol_targets_<dataset>.json",
+        "--base-experiments-dir",
+        default=os.path.join(REPO_ROOT, "scripts", "base_experiments"),
+        help="Contains <model>/memmaps.json for LOOCV fold index (same as pretraining).",
     )
     p.add_argument(
-        "--out", default=None,
-        help="Output JSON path for SOL metrics. "
-             "Default: sol_experiments/results/sol_<model>_<dataset>.json",
+        "--sol_targets",
+        default=None,
+        help="Expert SOL JSON. Default: BASE_DIRECTORY/sol/targets/<dataset>/sol_targets.json",
     )
     p.add_argument(
-        "--require_consecutive", type=int,
+        "--out",
+        default=None,
+        help="Optional path for rollup JSON (default: .../evaluations/.../summary.json). "
+        "Per-fold files are always written under fold_XX/.",
+    )
+    p.add_argument(
+        "--require_consecutive",
+        type=int,
         default=EVALUATE_DEFAULTS["require_consecutive"],
         help="Min consecutive non-wake epochs to confirm SOL.",
     )
@@ -146,110 +176,169 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(args: argparse.Namespace) -> None:
-    resolved_exp_dir  = args.exp_dir     or default_exp_dir(args.dataset, args.model)
-    resolved_targets  = args.sol_targets or default_targets_path(args.dataset)
-    resolved_out      = args.out         or default_results_path(args.dataset, args.model)
+    resolved_exp_dir = args.exp_dir or default_exp_dir(args.dataset, args.model)
+    resolved_targets = args.sol_targets or default_targets_path(args.dataset)
+    summary_out = args.out or sol_eval_summary_path(args.dataset, args.model)
 
-    print_config("evaluate_sol.py", {
-        "model":               args.model,
-        "dataset":             args.dataset,
-        "exp_dir":             resolved_exp_dir,
-        "sol_targets":         resolved_targets,
-        "out":                 resolved_out,
-        "require_consecutive": args.require_consecutive,
-    })
+    memmap_desc = load_memmap_description(
+        args.base_experiments_dir, args.model, args.dataset
+    )
+    fold_map = build_loov_fold_map(DATASET_SETTINGS[args.dataset], memmap_desc)
 
-    # ---- Validate inputs ----
+    print_config(
+        "evaluate_sol.py",
+        {
+            "model": args.model,
+            "dataset": args.dataset,
+            "exp_dir": resolved_exp_dir,
+            "base_experiments_dir": args.base_experiments_dir,
+            "sol_targets": resolved_targets,
+            "summary_out": summary_out,
+            "require_consecutive": args.require_consecutive,
+        },
+    )
+
     if not os.path.isdir(resolved_exp_dir):
-        print(f"ERROR: exp_dir not found: {resolved_exp_dir}")
-        print("  Run train_cnn_rnn.py (or run_base_experiments.py) first.")
+        print("ERROR: exp_dir not found: {}".format(resolved_exp_dir))
+        print("  Run scripts/run_cnn_rnn.py or run_base_experiments.py first.")
         sys.exit(1)
     if not os.path.exists(resolved_targets):
-        print(f"ERROR: sol_targets not found: {resolved_targets}")
+        print("ERROR: sol_targets not found: {}".format(resolved_targets))
         print("  Run compute_sol_targets.py first.")
         sys.exit(1)
 
-    # ---- Load reference SOLs ----
     sol_targets = load_sol_targets(resolved_targets)
-    ref_sols    = extract_consensus_sol(sol_targets)
-    print(f"Loaded {len(ref_sols)} consensus SOL targets.")
+    ref_sols = extract_consensus_sol(sol_targets)
+    print("Loaded {} consensus SOL targets.".format(len(ref_sols)))
 
-    # ---- Gather hypnogram files ----
+    expert_hint = _expert_interrater_summary(sol_targets)
+    if expert_hint:
+        print(
+            "Expert spread (mean inter-rater SD): {:.2f} min over {} records".format(
+                expert_hint["mean_interrater_std_min"],
+                expert_hint["n_records_with_std"],
+            )
+        )
+
     hyp_files = find_hypnogram_files(resolved_exp_dir)
     if not hyp_files:
-        print(f"ERROR: No hypnograms.json found under {resolved_exp_dir}")
+        print("ERROR: No hypnograms.json found under {}".format(resolved_exp_dir))
         sys.exit(1)
-    print(f"Found {len(hyp_files)} hypnograms.json file(s).\n")
+    print("Found {} hypnograms.json file(s).\n".format(len(hyp_files)))
 
-    # ---- Collect predictions across all folds ----
     all_pred_sols: Dict[str, Optional[float]] = {}
-    all_n1_f1:     Dict[str, Optional[float]] = {}
-    staging_accs:  List[float] = []
+    all_n1_f1: Dict[str, Optional[float]] = {}
+    staging_accs: List[float] = []
+    per_fold_meta: List[Dict] = []
 
-    for hyp_path in hyp_files:
+    for order_idx, hyp_path in enumerate(hyp_files):
+        run_dir = os.path.dirname(hyp_path)
+        fold_idx: Optional[int] = None
+        test_record: Optional[str] = None
+        desc_path = os.path.join(run_dir, "description.json")
+        if os.path.isfile(desc_path):
+            try:
+                with open(desc_path, "r", encoding="utf-8") as f:
+                    desc = json.load(f)
+                test_record, fold_idx = recover_test_record_and_fold_idx(desc, fold_map)
+            except Exception:
+                pass
+        if fold_idx is None:
+            fold_idx = order_idx
+            print(
+                "WARNING: could not resolve fold_idx from {}; using order index {}".format(
+                    run_dir,
+                    fold_idx,
+                )
+            )
+
         pred_sols, _ = sol_from_hypnograms_json(
             hyp_path, require_consecutive=args.require_consecutive
         )
-        all_pred_sols.update(pred_sols)
-        all_n1_f1.update(n1_f1_from_hypnograms(hyp_path))
+        n1_f1 = n1_f1_from_hypnograms(hyp_path)
         acc = mean_staging_accuracy(hyp_path)
+        fold_metrics = compute_sol_metrics(pred_sols, ref_sols)
+
+        fold_dir = sol_eval_fold_dir(args.dataset, args.model, fold_idx)
+        fold_payload = {
+            "model": args.model,
+            "dataset": args.dataset,
+            "fold_idx": fold_idx,
+            "test_record": test_record,
+            "run_dir": to_base_directory_relative(run_dir),
+            "hypnograms_json": to_base_directory_relative(hyp_path),
+            "require_consecutive": args.require_consecutive,
+            "sol_metrics": fold_metrics,
+            "n1_f1_per_record": n1_f1,
+            "mean_staging_accuracy": acc,
+        }
+        fold_json = os.path.join(fold_dir, "sol_eval.json")
+        with open(fold_json, "w", encoding="utf-8") as f:
+            json.dump(fold_payload, f, indent=2)
+        print("  Wrote {}".format(fold_json))
+
+        all_pred_sols.update(pred_sols)
+        all_n1_f1.update(n1_f1)
         if acc is not None:
             staging_accs.append(acc)
+        per_fold_meta.append(
+            {
+                "fold_idx": fold_idx,
+                "test_record": test_record,
+                "path": to_base_directory_relative(fold_json),
+            }
+        )
 
-    # ---- SOL metrics ----
     metrics = compute_sol_metrics(all_pred_sols, ref_sols)
 
-    # ---- Print report ----
-    print(f"\n{'='*65}")
-    print(f"  SOL EVALUATION  —  {args.model.upper()}  ({args.dataset.upper()})")
-    print(f"{'='*65}")
+    print("\n{}".format("=" * 65))
+    print("  SOL EVALUATION (LOSOCV rollup)  —  {}  ({})".format(
+        args.model.upper(), args.dataset.upper()
+    ))
+    print("{}".format("=" * 65))
     n = metrics.get("n_valid", 0)
-    print(f"  Records with valid SOL pair : {n}")
+    print("  Records with valid SOL pair : {}".format(n))
     if "mae_min" in metrics:
-        print(f"\n  MAE          : {metrics['mae_min']:.2f} min")
-        print(f"  RMSE         : {metrics['rmse_min']:.2f} min")
+        print("\n  MAE          : {:.2f} min".format(metrics["mae_min"]))
+        print("  RMSE         : {:.2f} min".format(metrics["rmse_min"]))
         direction = "over" if metrics["bias_min"] > 0 else "under"
-        print(f"  Bias         : {metrics['bias_min']:+.2f} min  ({direction}-estimate)")
-        print(f"  SD of errors : {metrics['std_err_min']:.2f} min")
-        print(f"  Pearson r    : {metrics['pearson_r']:.3f}")
+        print(
+            "  Bias         : {:+.2f} min  ({}-estimate)".format(
+                metrics["bias_min"], direction
+            )
+        )
+        print("  SD of errors : {:.2f} min".format(metrics["std_err_min"]))
+        print("  Pearson r    : {:.3f}".format(metrics["pearson_r"]))
 
     valid_n1 = [v for v in all_n1_f1.values() if v is not None]
     if valid_n1:
-        print(f"\n  N1 F1        : {np.mean(valid_n1):.3f} ± {np.std(valid_n1):.3f}")
-        print(f"  (Low N1 F1 → SOL errors driven by N1↔Wake mis-classification)")
+        print(
+            "\n  N1 F1        : {:.3f} ± {:.3f}".format(
+                np.mean(valid_n1), np.std(valid_n1)
+            )
+        )
 
     if staging_accs:
-        print(f"\n  Staging accuracy (mean) : {np.mean(staging_accs):.3f}")
+        print("\n  Staging accuracy (mean) : {:.3f}".format(np.mean(staging_accs)))
 
-    pr = metrics.get("per_record", {})
-    if pr:
-        print(f"\n  Per-record results (sorted by |error|):")
-        print(f"  {'Record':<20} {'Pred':>8} {'Ref':>8} {'Error':>10} {'N1 F1':>8}")
-        print(f"  {'-'*57}")
-        for rid, v in sorted(pr.items(),
-                              key=lambda kv: (kv[1]["abs_error_min"] or 999)):
-            pred_s = f"{v['predicted_min']:.1f}" if v["predicted_min"] is not None else "—"
-            ref_s  = f"{v['reference_min']:.1f}"  if v["reference_min"]  is not None else "—"
-            err_s  = f"{v['error_min']:+.1f}"     if v["error_min"]      is not None else "—"
-            n1_s   = f"{all_n1_f1.get(rid):.3f}"  if all_n1_f1.get(rid) is not None else "—"
-            print(f"  {rid:<20} {pred_s:>8} {ref_s:>8} {err_s:>10} {n1_s:>8}")
-    print(f"{'='*65}\n")
+    print("{}\n".format("=" * 65))
 
-    # ---- Save ----
-    output = {
-        "model":                args.model,
-        "dataset":              args.dataset,
-        "exp_dir":              resolved_exp_dir,
-        "sol_targets":          resolved_targets,
-        "require_consecutive":  args.require_consecutive,
-        "sol_metrics":          metrics,
-        "n1_f1_per_record":     all_n1_f1,
+    summary_payload = {
+        "model": args.model,
+        "dataset": args.dataset,
+        "exp_dir": to_base_directory_relative(resolved_exp_dir),
+        "sol_targets": to_base_directory_relative(resolved_targets),
+        "require_consecutive": args.require_consecutive,
+        "expert_interrater_summary": expert_hint,
+        "sol_metrics_rollup": metrics,
+        "n1_f1_per_record": all_n1_f1,
         "mean_staging_accuracy": float(np.mean(staging_accs)) if staging_accs else None,
+        "folds": per_fold_meta,
     }
-    os.makedirs(os.path.dirname(os.path.abspath(resolved_out)), exist_ok=True)
-    with open(resolved_out, "w") as f:
-        json.dump(output, f, indent=2)
-    print(f"Saved → {resolved_out}\n")
+    os.makedirs(os.path.dirname(os.path.abspath(summary_out)), exist_ok=True)
+    with open(summary_out, "w", encoding="utf-8") as f:
+        json.dump(summary_payload, f, indent=2)
+    print("Saved rollup → {}\n".format(summary_out))
 
 
 if __name__ == "__main__":

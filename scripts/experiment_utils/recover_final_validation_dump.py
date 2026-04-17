@@ -19,9 +19,9 @@ Also prints every run folder that has no ``best_model.gz`` or a file that is not
 valid ModuloNet checkpoint tar (``missing`` / ``invalid_or_corrupt_tar``).
 
 Usage:
-  python scripts/recover_final_validation_dump.py --dry-run
-  python scripts/recover_final_validation_dump.py --dataset dodh --algo cnn_rnn
-  python scripts/recover_final_validation_dump.py --runs-root path/to/dodh/cnn_rnn
+  python scripts/experiment_utils/recover_final_validation_dump.py --dry-run
+  python scripts/experiment_utils/recover_final_validation_dump.py --dataset dodh --algo cnn_rnn
+  python scripts/experiment_utils/recover_final_validation_dump.py --runs-root path/to/dodh/cnn_rnn
 """
 from __future__ import annotations
 
@@ -35,13 +35,14 @@ import tarfile
 import time
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, os.pardir, os.pardir))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from dreem_learning_open.datasets.dataset import DreemDataset
 from dreem_learning_open.models.modulo_net.net import ModuloNet
-from dreem_learning_open.settings import EXPERIMENTS_DIRECTORY
+from dreem_learning_open.settings import EXPERIMENTS_DIRECTORY, REPO_ROOT
 from dreem_learning_open.trainers.trainer import Trainer
 
 
@@ -303,7 +304,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--repo-root",
-        default=_REPO_ROOT,
+        default=REPO_ROOT,
         help="Project root for resolving relative memmap paths in description",
     )
     parser.add_argument("--dataset", default=None, help="Only this dataset name")

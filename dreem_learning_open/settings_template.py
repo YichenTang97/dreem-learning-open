@@ -1,12 +1,17 @@
 import os
 
 VERSION = "1_00"
+
+# Repository root (parent of the dreem_learning_open package).
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+
 # Suggested directory where H5 and memmaps will be stored
 BASE_DIRECTORY = "/data/"
 BASE_DIRECTORY_H5 = BASE_DIRECTORY + "h5/"
 BASE_DIRECTORY_MEMMAP = BASE_DIRECTORY + "memmap/"
 EXPERIMENTS_DIRECTORY = BASE_DIRECTORY + 'experiments/'
 RESULTS_DIRECTORY = BASE_DIRECTORY + 'results/'
+SOL_DIRECTORY = os.path.join(BASE_DIRECTORY, "sol")
 
 if not os.path.isdir(BASE_DIRECTORY):
     os.mkdir(BASE_DIRECTORY)
@@ -22,6 +27,15 @@ if not os.path.isdir(EXPERIMENTS_DIRECTORY):
 
 if not os.path.isdir(RESULTS_DIRECTORY):
     os.mkdir(RESULTS_DIRECTORY)
+
+for _sol_sub in (
+    SOL_DIRECTORY,
+    os.path.join(SOL_DIRECTORY, "targets"),
+    os.path.join(SOL_DIRECTORY, "evaluations"),
+    os.path.join(SOL_DIRECTORY, "finetuned"),
+):
+    if not os.path.isdir(_sol_sub):
+        os.mkdir(_sol_sub)
 
 DODH_SETTINGS = {
     'h5_directory': BASE_DIRECTORY_H5 + 'dodh/',

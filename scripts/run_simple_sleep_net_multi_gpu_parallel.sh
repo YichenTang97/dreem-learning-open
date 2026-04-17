@@ -50,8 +50,8 @@ if [[ ! -f "scripts/run_simple_sleep_net_only.py" ]]; then
   echo "Missing scripts/run_simple_sleep_net_only.py" >&2
   exit 1
 fi
-if [[ ! -f "scripts/index_experiments.py" ]]; then
-  echo "Missing scripts/index_experiments.py" >&2
+if [[ ! -f "scripts/experiment_utils/index_experiments.py" ]]; then
+  echo "Missing scripts/experiment_utils/index_experiments.py" >&2
   exit 1
 fi
 
@@ -294,7 +294,7 @@ while (( ROUND <= MAX_ROUNDS )); do
     continue
   fi
 
-  if ! "${PYTHON}" scripts/index_experiments.py --metric "${INDEX_METRIC}" \
+  if ! "${PYTHON}" scripts/experiment_utils/index_experiments.py --metric "${INDEX_METRIC}" \
     >"logs_multi_gpu_parallel/index_round_${ROUND}.log" 2>&1; then
     echo "Indexing failed. See logs_multi_gpu_parallel/index_round_${ROUND}.log" >&2
     exit 1

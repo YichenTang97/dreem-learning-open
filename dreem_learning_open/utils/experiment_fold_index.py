@@ -1,6 +1,7 @@
 """
 LOOCV fold map and test-subject recovery for experiment runs (shared by
-``index_experiments`` and ``cleanup_incomplete_experiments``).
+``scripts/experiment_utils/index_experiments.py`` and
+``scripts/experiment_utils/cleanup_incomplete_experiments.py``).
 """
 from __future__ import annotations
 
