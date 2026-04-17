@@ -273,12 +273,24 @@ def load_sol_targets(sol_targets_path: str) -> Dict[str, Dict]:
 
 
 def extract_consensus_sol(sol_targets: Dict[str, Dict]) -> Dict[str, Optional[float]]:
-    """Return {record_id -> consensus_sol_minutes} from the sol_targets dict."""
-    return {
-        rid: info.get("consensus_sol_min")
-        for rid, info in sol_targets.items()
-        if isinstance(info, dict) and not rid.startswith("_")
-    }
+    """
+    Return {record_id -> consensus_sol_minutes} from a targets payload.
+
+    Supports both formats:
+      1) Detailed rows (compute_sol_targets.py):
+         {rid: {"consensus_sol_min": ...}, "_meta": {...}}
+      2) Consensus-only rows:
+         {rid: <float_or_null>, "_meta": {...}}
+    """
+    consensus: Dict[str, Optional[float]] = {}
+    for rid, info in sol_targets.items():
+        if rid.startswith("_"):
+            continue
+        if isinstance(info, dict):
+            consensus[rid] = info.get("consensus_sol_min")
+        elif isinstance(info, (int, float)) or info is None:
+            consensus[rid] = float(info) if info is not None else None
+    return consensus
 
 
 def sol_from_hypnograms_json(hypnograms_json_path: str,

@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from typing import Dict, List, Optional, Tuple
 
@@ -101,6 +102,51 @@ def _align_target_to_prediction(pred: np.ndarray, target: np.ndarray) -> Tuple[n
         target = target[left: len(target) - right]
     n = min(len(pred), len(target))
     return pred[:n], target[:n]
+
+
+UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def _extract_record_id(key: str) -> Optional[str]:
+    """
+    Best-effort extraction of a record UUID from a record key/path.
+    """
+    if not key:
+        return None
+    normalized = key.replace("\\", "/").rstrip("/")
+    parts = [p for p in normalized.split("/") if p]
+    for token in reversed(parts):
+        if UUID_RE.match(token):
+            return token
+    if UUID_RE.match(normalized):
+        return normalized
+    return None
+
+
+def _normalize_per_record(
+    per_record: Dict[str, Optional[float]],
+    test_record: Optional[str] = None,
+) -> Dict[str, Optional[float]]:
+    """
+    Normalize model record keys to canonical UUIDs used by SOL targets.
+    """
+    normalized: Dict[str, Optional[float]] = {}
+    fallback_values: List[Optional[float]] = []
+    for key, value in per_record.items():
+        rid = _extract_record_id(key)
+        if rid is not None:
+            normalized[rid] = value
+        else:
+            fallback_values.append(value)
+
+    if test_record and test_record not in normalized:
+        if len(normalized) == 0 and len(fallback_values) == 1:
+            normalized[test_record] = fallback_values[0]
+        elif len(normalized) == 1:
+            normalized[test_record] = next(iter(normalized.values()))
+    return normalized
 
 
 def _load_target_hypnogram(record_key: str) -> Optional[np.ndarray]:
@@ -178,6 +224,26 @@ def _expert_interrater_summary(sol_targets: Dict) -> Optional[Dict[str, float]]:
     }
 
 
+def _model_vs_stored_human_benchmark(
+    sol_targets: Dict,
+    model_pred_sols: Dict[str, Optional[float]],
+) -> Optional[Dict]:
+    """
+    Read stored human scorer benchmark from sol_targets and append model comparison.
+    """
+    stored = sol_targets.get("_scorer_vs_mean_benchmark")
+    if not isinstance(stored, dict):
+        return None
+    mean_ref = stored.get("per_record_mean_sol_min")
+    if not isinstance(mean_ref, dict):
+        return None
+    model_vs_human_mean = compute_sol_metrics(model_pred_sols, mean_ref)
+    return {
+        **stored,
+        "model_vs_human_mean": model_vs_human_mean,
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description=(
@@ -210,7 +276,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--sol_targets",
         default=None,
-        help="Expert SOL JSON. Default: BASE_DIRECTORY/sol/targets/<dataset>/sol_targets.json",
+        help="SOL targets JSON (detailed or consensus-only). "
+        "Default: BASE_DIRECTORY/sol/targets/<dataset>/sol_targets.json",
     )
     p.add_argument(
         "--out",
@@ -304,10 +371,11 @@ def main(args: argparse.Namespace) -> None:
                 )
             )
 
-        pred_sols, _ = sol_from_hypnograms_json(
+        pred_sols_raw, _ = sol_from_hypnograms_json(
             hyp_path, require_consecutive=args.require_consecutive
         )
-        n1_f1 = n1_f1_from_hypnograms(hyp_path)
+        pred_sols = _normalize_per_record(pred_sols_raw, test_record=test_record)
+        n1_f1 = _normalize_per_record(n1_f1_from_hypnograms(hyp_path), test_record=test_record)
         acc = mean_staging_accuracy(hyp_path)
         fold_metrics = compute_sol_metrics(pred_sols, ref_sols)
 
@@ -342,6 +410,7 @@ def main(args: argparse.Namespace) -> None:
         )
 
     metrics = compute_sol_metrics(all_pred_sols, ref_sols)
+    scorer_benchmark = _model_vs_stored_human_benchmark(sol_targets, all_pred_sols)
 
     print("\n{}".format("=" * 65))
     print("  SOL EVALUATION (LOSOCV rollup)  —  {}  ({})".format(
@@ -361,6 +430,14 @@ def main(args: argparse.Namespace) -> None:
         )
         print("  SD of errors : {:.2f} min".format(metrics["std_err_min"]))
         print("  Pearson r    : {:.3f}".format(metrics["pearson_r"]))
+
+    if scorer_benchmark and scorer_benchmark.get("model_vs_human_mean", {}).get("mae_min") is not None:
+        model_mae = scorer_benchmark["model_vs_human_mean"]["mae_min"]
+        human_mean_mae = scorer_benchmark["human_baseline_mae"]["mean_mae_min"]
+        print("\n  Side-by-side scorer benchmark")
+        print("  Model MAE vs human-mean ref : {:.2f} min".format(model_mae))
+        if human_mean_mae is not None:
+            print("  Human scorer MAE (avg, LOO) : {:.2f} min".format(human_mean_mae))
 
     valid_n1 = [v for v in all_n1_f1.values() if v is not None]
     if valid_n1:
@@ -382,6 +459,7 @@ def main(args: argparse.Namespace) -> None:
         "sol_targets": to_base_directory_relative(resolved_targets),
         "require_consecutive": args.require_consecutive,
         "expert_interrater_summary": expert_hint,
+        "scorer_vs_mean_benchmark": scorer_benchmark,
         "sol_metrics_rollup": metrics,
         "n1_f1_per_record": all_n1_f1,
         "mean_staging_accuracy": float(np.mean(staging_accs)) if staging_accs else None,

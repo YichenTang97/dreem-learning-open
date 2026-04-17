@@ -370,7 +370,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--sol_targets", default=None,
-        help="Path to sol_targets.json. "
+        help="Path to SOL targets JSON. Supports either detailed "
+             "sol_targets.json or consensus-only consensus_sol_targets.json. "
              "Default: BASE_DIRECTORY/sol/targets/<dataset>/sol_targets.json",
     )
     p.add_argument(

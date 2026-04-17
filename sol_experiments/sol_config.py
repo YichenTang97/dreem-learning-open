@@ -92,6 +92,20 @@ def sol_targets_path(dataset: str = "dodh") -> str:
     return os.path.join(d, "sol_targets.json")
 
 
+def consensus_targets_path(dataset: str = "dodh") -> str:
+    """Dataset-wide consensus SOL mapping JSON: {record_id -> consensus_sol_min}."""
+    d = os.path.join(SOL_TARGETS_ROOT, dataset)
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, "consensus_sol_targets.json")
+
+
+def consensus_hypnograms_path(dataset: str = "dodh") -> str:
+    """Dataset-wide consensus hypnograms JSON: {record_id -> [stage, ...]}."""
+    d = os.path.join(SOL_TARGETS_ROOT, dataset)
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, "consensus_hypnograms.json")
+
+
 def sol_eval_model_root(dataset: str, model: str) -> str:
     """Root directory for per-fold SOL evaluation outputs for one pretrained model."""
     p = os.path.join(SOL_EVALUATIONS_ROOT, dataset, model)
