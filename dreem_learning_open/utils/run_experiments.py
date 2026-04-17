@@ -5,6 +5,7 @@ import random as rd
 
 from dreem_learning_open.logger.logger import log_experiment
 from dreem_learning_open.preprocessings.h5_to_memmap import h5_to_memmaps
+from dreem_learning_open.utils.indexed_run_complete import check_indexed_run_complete
 from dreem_learning_open.utils.train_test_val_split import train_test_val_split
 import shutil
 
@@ -38,20 +39,8 @@ def _recover_test_record_id(description):
 
 
 def _is_run_complete(run_dir, description):
-    if not isinstance(description, dict):
-        return False
-    required_files = [
-        os.path.join(run_dir, 'description.json'),
-        os.path.join(run_dir, 'hypnograms.json'),
-        os.path.join(run_dir, 'best_model.gz'),
-        os.path.join(run_dir, 'training', 'best_net'),
-    ]
-    if not all(os.path.isfile(path) for path in required_files):
-        return False
-    if not description.get('metadata', {}).get('end'):
-        return False
-    perf = description.get('performance_on_test_set')
-    return isinstance(perf, dict) and len(perf) > 0
+    ok, _ = check_indexed_run_complete(run_dir, description)
+    return ok
 
 
 def _find_incomplete_run_ids_by_test_record(save_folder):

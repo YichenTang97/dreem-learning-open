@@ -7,6 +7,12 @@ Outputs (under data/experiments/dodh/simple_sleep_net by default):
 - fold_summary.csv      : one row per fold with best completed run (by metric)
 - fold_summary.json     : JSON version of fold_summary.csv
 
+A run is ``completed`` only if ``description.json``, ``hypnograms.json``, and
+``best_model.gz`` exist and ``performance_on_test_set``, ``performance_per_records``,
+and ``records_split`` are all non-null with non-empty content (LOOV: exactly one
+``test_records``). ``metadata.end`` is not required, so recovered or interrupted
+runs still count as pending for ``run_*_parallel`` until outputs exist.
+
 Usage:
     python scripts/index_experiments.py
     python scripts/index_experiments.py --metric cohen_kappa
@@ -16,86 +22,23 @@ Usage:
 """
 import argparse
 import csv
-import hashlib
 import json
 import os
-import random as rd
 import time
 from typing import Dict, List, Optional, Tuple
 
 from dreem_learning_open.settings import DODO_SETTINGS, DODH_SETTINGS, EXPERIMENTS_DIRECTORY
+from dreem_learning_open.utils.experiment_fold_index import (
+    build_loov_fold_map,
+    load_memmap_description,
+    recover_test_record_and_fold_idx,
+)
+from dreem_learning_open.utils.indexed_run_complete import check_indexed_run_complete
 
 DATASET_SETTINGS = {
     "dodh": DODH_SETTINGS,
     "dodo": DODO_SETTINGS,
 }
-
-
-def memmap_hash(memmap_description: dict) -> str:
-    return hashlib.sha1(json.dumps(memmap_description).encode()).hexdigest()[:10]
-
-
-def load_memmap_description(base_experiments_dir: str, algo: str, dataset: str) -> dict:
-    memmaps_path = os.path.join(base_experiments_dir, algo, "memmaps.json")
-    with open(memmaps_path, "r") as f:
-        memmaps_description = json.load(f)
-
-    for description in memmaps_description:
-        if description.get("dataset") == dataset:
-            description = dict(description)
-            del description["dataset"]
-            return description
-    raise RuntimeError(
-        "No memmap block for dataset={!r} in {}".format(dataset, memmaps_path)
-    )
-
-
-def build_loov_fold_map(dataset_setting: dict, memmap_description: dict) -> Dict[str, int]:
-    dataset_dir = os.path.join(dataset_setting["memmap_directory"], memmap_hash(memmap_description))
-    if not os.path.isdir(dataset_dir):
-        raise FileNotFoundError("Memmap directory does not exist: {!r}".format(dataset_dir))
-
-    records = [
-        os.path.join(dataset_dir, record_name)
-        for record_name in os.listdir(dataset_dir)
-        if ".json" not in record_name
-    ]
-    rd.seed(2019)
-    rd.shuffle(records)
-
-    # dodh path in run_experiments is LOOV: folds = [[record] for record in records]
-    return {os.path.basename(record): idx for idx, record in enumerate(records)}
-
-
-def check_run_complete(run_dir: str, description: dict) -> Tuple[bool, Optional[str]]:
-    if not isinstance(description, dict):
-        return False, "invalid_description_type"
-    required_files = [
-        os.path.join(run_dir, "description.json"),
-        os.path.join(run_dir, "hypnograms.json"),
-        os.path.join(run_dir, "best_model.gz"),
-        os.path.join(run_dir, "training", "best_net"),
-    ]
-    for file_path in required_files:
-        if not os.path.isfile(file_path):
-            return False, "missing_file:{}".format(os.path.relpath(file_path, run_dir))
-
-    meta = description.get("metadata", {})
-    if not meta.get("end"):
-        return False, "metadata.end_missing"
-
-    records_split = description.get("records_split")
-    if not isinstance(records_split, dict):
-        records_split = {}
-    test_records = records_split.get("test_records", [])
-    if not isinstance(test_records, list) or len(test_records) != 1:
-        return False, "invalid_test_records"
-
-    perf = description.get("performance_on_test_set")
-    if not isinstance(perf, dict) or len(perf) == 0:
-        return False, "empty_performance_on_test_set"
-
-    return True, None
 
 
 def parse_run(run_root: str, run_id: str, fold_map: Dict[str, int], metric: str) -> dict:
@@ -130,10 +73,13 @@ def parse_run(run_root: str, run_id: str, fold_map: Dict[str, int], metric: str)
         record["reason"] = "description_parse_error:{}".format(exc)
         return record
 
-    complete, reason = check_run_complete(run_dir, description)
+    complete, reason = check_indexed_run_complete(run_dir, description)
     if not complete:
         record["reason"] = reason
         record["metadata_end"] = description.get("metadata", {}).get("end")
+        tr, fi = recover_test_record_and_fold_idx(description, fold_map)
+        record["test_record"] = tr
+        record["fold_idx"] = fi
         return record
 
     test_record = description["records_split"]["test_records"][0]
@@ -254,7 +200,11 @@ def main() -> None:
     if not os.path.isdir(runs_root):
         raise FileNotFoundError("Runs root does not exist: {!r}".format(runs_root))
 
-    run_ids = [name for name in os.listdir(runs_root) if os.path.isdir(os.path.join(runs_root, name))]
+    run_ids = [
+        name
+        for name in os.listdir(runs_root)
+        if os.path.isdir(os.path.join(runs_root, name)) and not name.startswith(".")
+    ]
     run_ids.sort()
     records = [parse_run(runs_root, run_id, fold_map, args.metric) for run_id in run_ids]
 
@@ -298,8 +248,20 @@ def main() -> None:
         json.dump(summary_rows, f, indent=2)
 
     completed_count = sum(1 for row in summary_rows if row["run_id"] is not None)
+    folds_still_open = len(summary_rows) - completed_count
+    runs_not_completed = sum(1 for r in records if r.get("status") != "completed")
     print("Indexed runs root:", runs_root)
     print("Discovered run folders:", len(run_ids))
+    print(
+        "Run folders with status != completed (failed / incomplete artifacts): {}".format(
+            runs_not_completed
+        )
+    )
+    print(
+        "Folds with no completed best run yet: {}/{}".format(
+            folds_still_open, len(summary_rows)
+        )
+    )
     print("Completed folds (best run found): {}/{}".format(completed_count, len(summary_rows)))
     print("Wrote:", jsonl_path)
     print("Wrote:", csv_path)

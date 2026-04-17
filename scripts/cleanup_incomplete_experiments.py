@@ -1,51 +1,42 @@
 """
 Cleanup incomplete/failed experiment UUID folders.
 
-Default mode is dry-run (no deletion). Use --apply to actually remove folders.
+"Incomplete" matches ``check_indexed_run_complete`` (same as ``index_experiments``).
+
+By default, only incomplete runs whose LOOCV fold already has at least one
+*completed* run in the same ``runs_root`` are candidates for deletion (e.g. stale
+duplicate attempts). Incomplete runs that are the only folder for their test
+subject are kept so you do not lose the only attempt at a fold.
+
+Use ``--all-incomplete`` to delete every incomplete folder (previous behavior),
+subject to ``--keep-last``.
+
+Default mode is dry-run (no deletion). Use ``--apply`` to actually remove folders.
 
 Examples:
   python scripts/cleanup_incomplete_experiments.py
   python scripts/cleanup_incomplete_experiments.py --apply
   python scripts/cleanup_incomplete_experiments.py --dataset dodh --algo simple_sleep_net --apply
+  python scripts/cleanup_incomplete_experiments.py --all-incomplete --apply
 """
 import argparse
 import json
 import os
 import shutil
-from typing import Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
-from dreem_learning_open.settings import EXPERIMENTS_DIRECTORY
+from dreem_learning_open.settings import DODO_SETTINGS, DODH_SETTINGS, EXPERIMENTS_DIRECTORY
+from dreem_learning_open.utils.experiment_fold_index import (
+    build_loov_fold_map,
+    load_memmap_description,
+    recover_test_record_and_fold_idx,
+)
+from dreem_learning_open.utils.indexed_run_complete import check_indexed_run_complete
 
-
-def check_run_complete(run_dir: str, description: dict) -> Tuple[bool, Optional[str]]:
-    if not isinstance(description, dict):
-        return False, "invalid_description_type"
-    required_files = [
-        os.path.join(run_dir, "description.json"),
-        os.path.join(run_dir, "hypnograms.json"),
-        os.path.join(run_dir, "best_model.gz"),
-        os.path.join(run_dir, "training", "best_net"),
-    ]
-    for file_path in required_files:
-        if not os.path.isfile(file_path):
-            return False, "missing_file:{}".format(os.path.relpath(file_path, run_dir))
-
-    meta = description.get("metadata", {})
-    if not meta.get("end"):
-        return False, "metadata.end_missing"
-
-    records_split = description.get("records_split")
-    if not isinstance(records_split, dict):
-        records_split = {}
-    test_records = records_split.get("test_records", [])
-    if not isinstance(test_records, list) or len(test_records) != 1:
-        return False, "invalid_test_records"
-
-    perf = description.get("performance_on_test_set")
-    if not isinstance(perf, dict) or len(perf) == 0:
-        return False, "empty_performance_on_test_set"
-
-    return True, None
+DATASET_SETTINGS = {
+    "dodh": DODH_SETTINGS,
+    "dodo": DODO_SETTINGS,
+}
 
 
 def classify_run(run_dir: str) -> Tuple[str, str]:
@@ -57,15 +48,30 @@ def classify_run(run_dir: str) -> Tuple[str, str]:
         return "incomplete", "missing_description"
 
     try:
-        with open(description_path, "r") as f:
+        with open(description_path, "r", encoding="utf-8-sig") as f:
             description = json.load(f)
     except Exception as exc:
         return "incomplete", "description_parse_error:{}".format(exc)
 
-    complete, reason = check_run_complete(run_dir, description)
+    if not isinstance(description, dict):
+        return "incomplete", "invalid_description_type"
+
+    complete, reason = check_indexed_run_complete(run_dir, description)
     if complete:
         return "completed", "ok"
     return "incomplete", reason or "unknown"
+
+
+def _load_description_dict(run_dir: str) -> Optional[dict]:
+    description_path = os.path.join(run_dir, "description.json")
+    if not os.path.isfile(description_path):
+        return None
+    try:
+        with open(description_path, "r", encoding="utf-8-sig") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
 
 
 def main() -> int:
@@ -78,6 +84,11 @@ def main() -> int:
         help="Override runs root (default: EXPERIMENTS_DIRECTORY/<dataset>/<algo>)",
     )
     parser.add_argument(
+        "--base-experiments-dir",
+        default="scripts/base_experiments",
+        help="Directory containing <algo>/memmaps.json (must match indexing)",
+    )
+    parser.add_argument(
         "--apply",
         action="store_true",
         help="Actually delete incomplete folders. Default is dry-run.",
@@ -86,19 +97,40 @@ def main() -> int:
         "--keep-last",
         type=int,
         default=0,
-        help="Keep newest N incomplete runs (by folder mtime) and do not delete them.",
+        help="Keep newest N deletion candidates (by folder mtime) and do not delete them.",
+    )
+    parser.add_argument(
+        "--all-incomplete",
+        action="store_true",
+        help="Delete all incomplete runs, not only those with a completed run for the same fold.",
     )
     args = parser.parse_args()
+
+    if args.dataset not in DATASET_SETTINGS:
+        raise ValueError(
+            "Unsupported dataset {!r}; expected one of: {}".format(
+                args.dataset, sorted(DATASET_SETTINGS.keys())
+            )
+        )
 
     runs_root = args.runs_root or os.path.join(EXPERIMENTS_DIRECTORY, args.dataset, args.algo)
     if not os.path.isdir(runs_root):
         raise FileNotFoundError("Runs root does not exist: {!r}".format(runs_root))
 
-    run_ids = [name for name in os.listdir(runs_root) if os.path.isdir(os.path.join(runs_root, name))]
+    memmap_description = load_memmap_description(
+        args.base_experiments_dir, args.algo, args.dataset
+    )
+    fold_map = build_loov_fold_map(DATASET_SETTINGS[args.dataset], memmap_description)
+
+    run_ids = [
+        name
+        for name in os.listdir(runs_root)
+        if os.path.isdir(os.path.join(runs_root, name)) and not name.startswith(".")
+    ]
     run_ids.sort()
 
-    incomplete = []
-    completed = []
+    incomplete: List[dict] = []
+    completed: List[dict] = []
     for run_id in run_ids:
         run_dir = os.path.join(runs_root, run_id)
         status, reason = classify_run(run_dir)
@@ -113,7 +145,39 @@ def main() -> int:
         else:
             incomplete.append(item)
 
-    incomplete_sorted_newest = sorted(incomplete, key=lambda x: x["mtime"], reverse=True)
+    test_records_with_completed: Set[str] = set()
+    for item in completed:
+        desc = _load_description_dict(item["run_dir"])
+        if desc is None:
+            continue
+        tr, _ = recover_test_record_and_fold_idx(desc, fold_map)
+        if tr is not None:
+            test_records_with_completed.add(tr)
+
+    if args.all_incomplete:
+        deletion_pool = list(incomplete)
+    else:
+        deletion_pool = []
+        skipped_protected = 0
+        for item in incomplete:
+            desc = _load_description_dict(item["run_dir"])
+            if desc is None:
+                skipped_protected += 1
+                continue
+            tr, _ = recover_test_record_and_fold_idx(desc, fold_map)
+            if tr is None:
+                skipped_protected += 1
+                continue
+            if tr in test_records_with_completed:
+                deletion_pool.append(item)
+            else:
+                skipped_protected += 1
+        print(
+            "Incomplete skipped (sole attempt for fold or cannot resolve test subject):",
+            skipped_protected,
+        )
+
+    incomplete_sorted_newest = sorted(deletion_pool, key=lambda x: x["mtime"], reverse=True)
     keep_ids = set()
     if args.keep_last > 0:
         for item in incomplete_sorted_newest[: args.keep_last]:
@@ -123,9 +187,12 @@ def main() -> int:
 
     print("Runs root:", runs_root)
     print("Completed:", len(completed))
-    print("Incomplete:", len(incomplete))
-    if keep_ids:
-        print("Keeping newest incomplete (--keep-last={}): {}".format(args.keep_last, len(keep_ids)))
+    print("Incomplete (total):", len(incomplete))
+    if not args.all_incomplete:
+        print(
+            "Deletion policy: only incomplete runs whose test fold has another completed run "
+            "in this directory (use --all-incomplete for every incomplete folder)."
+        )
     print("Candidates for deletion:", len(candidates))
 
     if not candidates:

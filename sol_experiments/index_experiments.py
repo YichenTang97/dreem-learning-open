@@ -1,6 +1,9 @@
 """
 Wrapper around scripts/index_experiments.py with SOL-friendly defaults.
 
+Completion rules match ``dreem_learning_open.utils.indexed_run_complete`` (artifacts
++ non-null ``performance_*`` / ``records_split``; ``metadata.end`` not required).
+
 Usage:
     python sol_experiments/index_experiments.py
     python sol_experiments/index_experiments.py --dataset dodh --algo cnn_rnn
