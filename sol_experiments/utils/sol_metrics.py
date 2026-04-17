@@ -298,9 +298,23 @@ def sol_from_hypnograms_json(hypnograms_json_path: str,
 
     predicted_sols, target_sols = {}, {}
     for rid, data in hypnograms.items():
-        pred_hyp   = np.array(data["predicted"], dtype=int)
-        target_hyp = np.array(data["target"],    dtype=int)
-        predicted_sols[rid] = compute_sol(pred_hyp,   require_consecutive=require_consecutive)
-        target_sols[rid]    = compute_sol(target_hyp, require_consecutive=require_consecutive)
+        # Backward-compatible formats:
+        # 1) {rid: {"predicted": [...], "target": [...]} }  (new)
+        # 2) {rid: [...]}                                    (legacy, predicted only)
+        if isinstance(data, dict):
+            pred_raw = data.get("predicted")
+            target_raw = data.get("target")
+        else:
+            pred_raw = data
+            target_raw = None
+
+        predicted_sols[rid] = (
+            compute_sol(np.array(pred_raw, dtype=int), require_consecutive=require_consecutive)
+            if pred_raw is not None else None
+        )
+        target_sols[rid] = (
+            compute_sol(np.array(target_raw, dtype=int), require_consecutive=require_consecutive)
+            if target_raw is not None else None
+        )
 
     return predicted_sols, target_sols

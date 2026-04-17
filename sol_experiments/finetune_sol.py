@@ -288,8 +288,9 @@ def finetune_fold(
     hypnograms_out, t_pred, t_ref = {}, {}, {}
     for rec in fold_test:
         rid = record_id(rec)
-        pred_hyp, target_hyp = evaluate_record(net, ds_test, rec)
-        hypnograms_out[rid] = {"predicted": pred_hyp, "target": target_hyp}
+        pred_hyp, _target_hyp = evaluate_record(net, ds_test, rec)
+        # Keep the same format as base experiments: predicted hypnogram only.
+        hypnograms_out[rec] = pred_hyp
         t_pred[rid] = compute_sol(np.array(pred_hyp), epoch_duration_s)
         t_ref[rid]  = true_sol(rec)
     test_metrics = compute_sol_metrics(t_pred, t_ref)

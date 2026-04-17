@@ -71,13 +71,62 @@ def find_hypnogram_files(exp_dir: str) -> List[str]:
     return sorted(found)
 
 
+def _resolve_record_dir(record_key: str) -> Optional[str]:
+    """Resolve a hypnograms.json record key to an on-disk memmap record directory."""
+    candidates = []
+    if os.path.isabs(record_key):
+        candidates.append(record_key)
+    else:
+        candidates.append(os.path.join(REPO_ROOT, record_key))
+        if record_key.startswith("data/"):
+            candidates.append(os.path.join(REPO_ROOT, record_key.replace("data/", "", 1)))
+
+    for c in candidates:
+        if os.path.isdir(c):
+            return c
+    return None
+
+
+def _align_target_to_prediction(pred: np.ndarray, target: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Align target and prediction lengths.
+    Base runs often trim padding at both ends before saving predictions.
+    """
+    pred = np.asarray(pred, dtype=int)
+    target = np.asarray(target, dtype=int)
+    if len(target) > len(pred):
+        diff = len(target) - len(pred)
+        left = diff // 2
+        right = diff - left
+        target = target[left: len(target) - right]
+    n = min(len(pred), len(target))
+    return pred[:n], target[:n]
+
+
+def _load_target_hypnogram(record_key: str) -> Optional[np.ndarray]:
+    record_dir = _resolve_record_dir(record_key)
+    if record_dir is None:
+        return None
+    hyp_path = os.path.join(record_dir, "hypno.mm")
+    if not os.path.exists(hyp_path):
+        return None
+    try:
+        return np.memmap(hyp_path, mode="r", dtype="float32").astype(int)
+    except Exception:
+        return None
+
+
 def n1_f1_from_hypnograms(hyp_path: str) -> Dict[str, Optional[float]]:
     with open(hyp_path) as f:
         data = json.load(f)
     results = {}
     for rid, hyps in data.items():
-        pred = np.array(hyps["predicted"], dtype=int)
-        true = np.array(hyps["target"], dtype=int)
+        pred = np.array(hyps["predicted"], dtype=int) if isinstance(hyps, dict) else np.array(hyps, dtype=int)
+        true = _load_target_hypnogram(rid)
+        if true is None:
+            results[rid] = None
+            continue
+        pred, true = _align_target_to_prediction(pred, true)
         mask = true >= 0
         if mask.sum() == 0:
             results[rid] = None
@@ -100,9 +149,12 @@ def mean_staging_accuracy(hyp_path: str) -> Optional[float]:
     with open(hyp_path) as f:
         data = json.load(f)
     accs = []
-    for hyps in data.values():
-        pred = np.array(hyps["predicted"], dtype=int)
-        true = np.array(hyps["target"], dtype=int)
+    for rid, hyps in data.items():
+        pred = np.array(hyps["predicted"], dtype=int) if isinstance(hyps, dict) else np.array(hyps, dtype=int)
+        true = _load_target_hypnogram(rid)
+        if true is None:
+            continue
+        pred, true = _align_target_to_prediction(pred, true)
         mask = true >= 0
         if mask.sum():
             accs.append((pred[mask] == true[mask]).mean())
