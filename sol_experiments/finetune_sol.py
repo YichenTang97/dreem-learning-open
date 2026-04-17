@@ -43,6 +43,7 @@ import copy
 import json
 import os
 import random
+import subprocess
 import sys
 from typing import Dict, List, Optional, Tuple
 
@@ -81,22 +82,30 @@ from dreem_learning_open.utils.run_experiments import memmap_hash
 # Data utilities
 # ---------------------------------------------------------------------------
 
-def get_record_sequential(dataset: DreemDataset, record: str) -> Tuple[Dict, torch.Tensor]:
+def get_record_sequential(
+    dataset: DreemDataset, record: str
+) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor], torch.Tensor]:
     """
     Collect all epochs from `record` in sequential order.
-    Returns (groups_cat, hyp_cat) where hyp_cat has shape (n_epochs, TC).
+    Returns (groups_cat, features_cat, hyp_cat) where hyp_cat has shape (n_epochs, TC).
     """
     groups_tensors: Dict[str, List[torch.Tensor]] = {g: [] for g in dataset.groups}
+    features_tensors: Dict[str, List[torch.Tensor]] = {}
     hyp_list: List[torch.Tensor] = []
 
     for batch in dataset.get_record(record, batch_size=128, mode="eval"):
         for g in dataset.groups:
             groups_tensors[g].append(batch["groups"][g])
+        for fname, fval in batch.get("features", {}).items():
+            features_tensors.setdefault(fname, []).append(fval)
         hyp_list.append(batch["hypnogram"])
 
     groups_cat = {g: torch.cat(groups_tensors[g], dim=0) for g in dataset.groups}
+    features_cat = {
+        fname: torch.cat(fvals, dim=0) for fname, fvals in features_tensors.items() if fvals
+    }
     hyp_cat    = torch.cat(hyp_list, dim=0)
-    return groups_cat, hyp_cat
+    return groups_cat, features_cat, hyp_cat
 
 
 def evaluate_record(net: ModuloNet, dataset: DreemDataset,
@@ -139,7 +148,7 @@ def finetune_step(
     device = net.device
     net.train()
 
-    groups_cat, hyp_cat = get_record_sequential(dataset, record)
+    groups_cat, features_cat, hyp_cat = get_record_sequential(dataset, record)
     n_total = hyp_cat.shape[0]
 
     if window_end <= 0 or true_sol_epochs >= n_total:
@@ -155,12 +164,19 @@ def finetune_step(
                 g: groups_cat[g][ep_idx].unsqueeze(0).to(device)
                 for g in dataset.groups
             },
-            "features": {}
+            "features": {
+                fname: features_cat[fname][ep_idx].unsqueeze(0).to(device)
+                for fname in features_cat
+            },
         }
         logits, _ = net.forward(g_batch)
-        # Handle both "one" and "many" output modes
+        # Handle both "one" and "many" output modes.
+        # For "many", ModuloNet flattens temporal outputs to shape (B*TC, C);
+        # with B=1 we recover the central epoch logits to match the central label.
         if logits.dim() == 3:
             logits = logits[:, tc // 2, :]
+        elif logits.dim() == 2 and logits.shape[0] == tc:
+            logits = logits[tc // 2].unsqueeze(0)
         all_logits.append(logits.squeeze(0))
         all_labels.append(hyp_cat[ep_idx, tc // 2])
 
@@ -245,6 +261,8 @@ def finetune_fold(
           f"alpha={alpha}  lr={lr}  "
           f"train={len(train_records)} val={len(val_records)}")
 
+    stop_reason = "max_epochs_reached"
+    epochs_ran = 0
     for epoch in range(epochs):
         losses = []
         random.shuffle(train_records)
@@ -271,6 +289,7 @@ def finetune_fold(
               + ("  ← best" if is_best else ""))
         history.append({"epoch": epoch, "train_loss": round(mean_loss, 4),
                         "val_mae_min": round(val_mae, 3) if val_mae != float("inf") else None})
+        epochs_ran = epoch + 1
 
         if is_best:
             best_val_mae = val_mae
@@ -280,6 +299,7 @@ def finetune_fold(
             patience_ctr += 1
             if patience_ctr >= patience:
                 print(f"    Early stop at epoch {epoch}.")
+                stop_reason = "early_stop"
                 break
 
     # ---- Test evaluation ----
@@ -305,6 +325,14 @@ def finetune_fold(
     result = {
         "fold_idx": fold_idx,
         "base_fold_dir": to_base_directory_relative(base_fold_dir),
+        "finished_training": True,
+        "stop_reason": stop_reason,
+        "epochs_ran": epochs_ran,
+        "requested_epochs": epochs,
+        "requested_patience": patience,
+        "requested_lr": lr,
+        "requested_cutoff_minutes": cutoff_minutes,
+        "requested_alpha": alpha,
         "best_val_mae": round(best_val_mae, 3),
         "test_sol_metrics": test_metrics, "training_history": history,
     }
@@ -341,6 +369,22 @@ def find_fold_dirs(base_exp_dir: str) -> Dict[str, str]:
         if test_recs:
             result[os.path.basename(test_recs[0])] = full
     return result
+
+
+def partition_evenly(items: List[int], n_buckets: int) -> List[List[int]]:
+    n_buckets = max(1, n_buckets)
+    buckets = [[] for _ in range(n_buckets)]
+    for i, item in enumerate(items):
+        buckets[i % n_buckets].append(item)
+    return [b for b in buckets if b]
+
+
+def _resolve_gpu_slots(requested: Optional[List[int]]) -> List[int]:
+    if requested:
+        return requested
+    if torch.cuda.is_available():
+        return list(range(torch.cuda.device_count()))
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -399,10 +443,56 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Re-run folds even if fold_<NN>/ already has finetune_results.json and hypnograms.json.",
     )
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Parallel worker processes. >1 runs folds in parallel.",
+    )
+    p.add_argument(
+        "--gpus",
+        type=int,
+        nargs="*",
+        default=None,
+        metavar="ID",
+        help="Optional CUDA GPU ids to use (default: all visible GPUs).",
+    )
+    p.add_argument(
+        "--_worker",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     return p
 
 
-def main(args: argparse.Namespace) -> None:
+def _is_completed_finetune_result(result: Dict, args: argparse.Namespace) -> bool:
+    """
+    A fold is reusable only if training finished cleanly and with matching config.
+    """
+    if not isinstance(result, dict):
+        return False
+    if result.get("finished_training") is not True:
+        return False
+    if result.get("stop_reason") not in {"early_stop", "max_epochs_reached"}:
+        return False
+    epochs_ran = result.get("epochs_ran")
+    if not isinstance(epochs_ran, int) or epochs_ran <= 0:
+        return False
+
+    expected = {
+        "requested_epochs": args.epochs,
+        "requested_patience": args.patience,
+        "requested_lr": args.lr,
+        "requested_cutoff_minutes": args.cutoff_minutes,
+        "requested_alpha": args.alpha,
+    }
+    for key, value in expected.items():
+        if result.get(key) != value:
+            return False
+    return True
+
+
+def run_finetune(args: argparse.Namespace) -> None:
     resolved_base = args.base_exp_dir or default_exp_dir(args.dataset, args.base_model)
     resolved_sol  = args.sol_targets  or default_targets_path(args.dataset)
     resolved_out  = args.out_dir      or default_finetune_dir(
@@ -484,15 +574,21 @@ def main(args: argparse.Namespace) -> None:
         fold_out = os.path.join(resolved_out, f"fold_{fold_idx:02d}")
         done_json = os.path.join(fold_out, "finetune_results.json")
         done_hyp  = os.path.join(fold_out, "hypnograms.json")
-        if (
-            not args.force
-            and os.path.isfile(done_json)
-            and os.path.isfile(done_hyp)
-        ):
-            print(f"  [Fold {fold_idx}] already complete → {fold_out}")
-            with open(done_json) as f:
-                all_results.append(json.load(f))
-            continue
+        if not args.force and os.path.isfile(done_json) and os.path.isfile(done_hyp):
+            can_reuse = False
+            done_payload = None
+            try:
+                with open(done_json) as f:
+                    done_payload = json.load(f)
+                can_reuse = _is_completed_finetune_result(done_payload, args)
+            except Exception:
+                can_reuse = False
+
+            if can_reuse:
+                print(f"  [Fold {fold_idx}] already complete → {fold_out}")
+                all_results.append(done_payload)
+                continue
+            print(f"  [Fold {fold_idx}] existing artifacts are incomplete/stale; re-running.")
 
         test_fold = all_folds[fold_idx]
         other     = [r for r in all_records if r not in test_fold]
@@ -534,12 +630,99 @@ def main(args: argparse.Namespace) -> None:
         "base_model": args.base_model, "dataset": args.dataset,
         "cutoff_minutes": args.cutoff_minutes, "alpha": args.alpha,
         "lr": args.lr, "epochs": args.epochs, "patience": args.patience,
+        "workers": args.workers,
+        "gpus": args.gpus,
         "mean_test_sol_mae_min": float(np.mean(valid_maes)) if valid_maes else None,
         "std_test_sol_mae_min":  float(np.std(valid_maes))  if valid_maes else None,
         "fold_results": all_results,
     }
     with open(os.path.join(resolved_out, "finetune_summary.json"), "w") as f:
         json.dump(summary, f, indent=2)
+
+
+def main(args: argparse.Namespace) -> None:
+    # Worker mode runs the core logic directly.
+    if args._worker:
+        run_finetune(args)
+        return
+
+    # Single worker: keep current behavior.
+    if args.workers <= 1:
+        run_finetune(args)
+        return
+
+    # Multi-worker scheduler: partition folds and launch subprocess workers.
+    if args.folds:
+        all_target_folds = sorted(set(args.folds))
+    else:
+        # We need fold count to partition all folds deterministically.
+        resolved_base = args.base_exp_dir or default_exp_dir(args.dataset, args.base_model)
+        fold_map = find_fold_dirs(resolved_base)
+        all_target_folds = sorted(range(len(fold_map)))
+
+    gpu_slots = _resolve_gpu_slots(args.gpus)
+    n_workers = min(args.workers, len(all_target_folds))
+    fold_batches = partition_evenly(all_target_folds, n_workers)
+
+    print("\nLaunching {} parallel worker(s) for {} fold(s).".format(
+        len(fold_batches), len(all_target_folds)
+    ))
+    if gpu_slots:
+        print("GPU slots: {}".format(" ".join(str(x) for x in gpu_slots)))
+    else:
+        print("No CUDA GPUs selected/available; workers run on CPU.")
+
+    procs: List[Tuple[subprocess.Popen, List[int], Optional[int]]] = []
+    for worker_idx, batch in enumerate(fold_batches):
+        cmd = [
+            sys.executable,
+            "sol_experiments/finetune_sol.py",
+            "--base_model", args.base_model,
+            "--dataset", args.dataset,
+            "--cutoff_minutes", str(args.cutoff_minutes),
+            "--alpha", str(args.alpha),
+            "--lr", str(args.lr),
+            "--epochs", str(args.epochs),
+            "--patience", str(args.patience),
+            "--workers", "1",
+            "--_worker",
+            "--folds",
+            *[str(x) for x in batch],
+        ]
+        if args.base_exp_dir is not None:
+            cmd.extend(["--base_exp_dir", args.base_exp_dir])
+        if args.sol_targets is not None:
+            cmd.extend(["--sol_targets", args.sol_targets])
+        if args.out_dir is not None:
+            cmd.extend(["--out_dir", args.out_dir])
+        if args.force:
+            cmd.append("--force")
+
+        env = dict(os.environ)
+        assigned_gpu: Optional[int] = None
+        if gpu_slots:
+            assigned_gpu = gpu_slots[worker_idx % len(gpu_slots)]
+            env["CUDA_VISIBLE_DEVICES"] = str(assigned_gpu)
+
+        print("  worker {} -> folds {}{}".format(
+            worker_idx,
+            " ".join(str(x) for x in batch),
+            "" if assigned_gpu is None else " | gpu {}".format(assigned_gpu),
+        ))
+        proc = subprocess.Popen(cmd, env=env)
+        procs.append((proc, batch, assigned_gpu))
+
+    failed = False
+    for proc, batch, assigned_gpu in procs:
+        code = proc.wait()
+        if code != 0:
+            failed = True
+            print("Worker failed (exit={} folds={} gpu={})".format(
+                code, batch, assigned_gpu
+            ))
+
+    if failed:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
