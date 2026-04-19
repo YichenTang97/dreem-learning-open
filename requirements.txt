@@ -12,6 +12,9 @@ pytest #==5.0.0
 pytest-cov #==2.7.1
 scikit-learn #==0.20.1
 joblib #==0.13.0
+# Optional: pip install mrmr-selection pandas (Peng mRMR); otherwise a built-in MI–correlation mRMR is used.
+mrmr-selection
+pandas
 gitpython
 pyedflib
 patsy

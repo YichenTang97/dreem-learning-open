@@ -25,6 +25,9 @@ Custom usage:
         --exp_dir /custom/experiment/dir/ \\
         --base-experiments-dir scripts/base_experiments
 
+Classical RF baseline (Memar et al.; same dodh memmap / fold index as ``simple_sleep_net``):
+    python sol_experiments/evaluate_sol.py --model memar_et_al --dataset dodh
+
 **Outputs** (under ``BASE_DIRECTORY/sol/evaluations/<dataset>/<name>/``; ``<name>`` is
 ``--model`` for pretrained runs, or the finetuned folder name when ``--finetuned``):
   - ``fold_XX/sol_eval.json`` — metrics for that LOSO fold

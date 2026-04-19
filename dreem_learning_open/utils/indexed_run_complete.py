@@ -51,11 +51,17 @@ def check_indexed_run_complete(run_dir: str, description: dict) -> Tuple[bool, O
     if not isinstance(rs, dict):
         return False, "records_split_invalid"
 
+    memar_no_val = bool(description.get("memar_et_al_subject_cv"))
+
     for key in ("train_records", "validation_records", "test_records"):
         v = rs.get(key)
         if v is None:
             return False, "records_split_null:{}".format(key)
-        if not isinstance(v, list) or len(v) == 0:
+        if not isinstance(v, list):
+            return False, "records_split_invalid_list:{}".format(key)
+        if len(v) == 0:
+            if key == "validation_records" and memar_no_val:
+                continue
             return False, "records_split_empty:{}".format(key)
 
     test_records = rs.get("test_records", [])

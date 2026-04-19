@@ -1,0 +1,14 @@
+{
+  "fs": 100,
+  "bands_hz": [
+    {"id": "delta", "symbol": "δ", "low_hz": 0.0, "high_hz": 4.0, "lowpass_only": true},
+    {"id": "theta", "symbol": "θ", "low_hz": 4.0, "high_hz": 8.0, "lowpass_only": false},
+    {"id": "alpha", "symbol": "α", "low_hz": 8.0, "high_hz": 12.0, "lowpass_only": false},
+    {"id": "sigma", "symbol": "σ", "low_hz": 12.0, "high_hz": 15.0, "lowpass_only": false},
+    {"id": "beta1", "symbol": "β₁", "low_hz": 15.0, "high_hz": 22.0, "lowpass_only": false},
+    {"id": "beta2", "symbol": "β₂", "low_hz": 22.0, "high_hz": 30.0, "lowpass_only": false},
+    {"id": "gamma1", "symbol": "γ₁", "low_hz": 30.0, "high_hz": 40.0, "lowpass_only": false},
+    {"id": "gamma2", "symbol": "γ₂", "low_hz": 40.0, "high_hz": 49.5, "lowpass_only": false}
+  ],
+  "notes": "Memar & Faradji (2018) Table I. Delta: lowpass 4 Hz (0 Hz highpass not realizable with Butterworth). Other bands: bandpass. Nyquist requires fs > 99 Hz for γ₂."
+}

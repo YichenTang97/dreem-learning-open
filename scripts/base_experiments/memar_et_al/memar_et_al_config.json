@@ -1,0 +1,4 @@
+{
+  "eeg_signal": "signals/eeg/F4_O2",
+  "_comment": "Single bipolar derivation used for 104 features. Must appear in memmaps.json under signals.eeg.signals (same order sets the memmap column index)."
+}
