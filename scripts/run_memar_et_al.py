@@ -29,7 +29,12 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
-from concurrent.futures import BrokenProcessPool
+
+try:
+    from concurrent.futures import BrokenProcessPool
+except ImportError:
+    # Python 3.13+ may not re-export; class lives on the process pool module.
+    from concurrent.futures.process import BrokenProcessPool
 import copy
 import hashlib
 import json
