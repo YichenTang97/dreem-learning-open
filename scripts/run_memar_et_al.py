@@ -49,6 +49,7 @@ from sklearn.metrics import accuracy_score, cohen_kappa_score, f1_score
 
 from dreem_learning_open.memar_et_al.config import default_memar_et_al_config_path, get_eeg_signal
 from dreem_learning_open.memar_et_al.feature_cache import (
+    CACHE_DIRNAME,
     compute_feature_cache_key,
     ensure_memar_feature_cache,
     expected_feature_dim,
@@ -411,6 +412,23 @@ def _run_fold_unpack(kwargs: dict) -> str:
     return run_fold(**kwargs)
 
 
+def _clear_experiment_outputs_keep_feature_cache(save_folder: str) -> None:
+    """
+    Remove prior LOSO run directories (uuid folders, loose files) under ``save_folder``,
+    but keep ``memar_features_cache/`` so interrupted runs can resume without re-extracting.
+    """
+    if not os.path.isdir(save_folder):
+        return
+    for name in os.listdir(save_folder):
+        if name == CACHE_DIRNAME:
+            continue
+        path = os.path.join(save_folder, name)
+        if os.path.isdir(path):
+            shutil.rmtree(path)
+        elif os.path.isfile(path):
+            os.unlink(path)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
@@ -425,7 +443,8 @@ def main() -> None:
     parser.add_argument(
         "--no-force",
         action="store_true",
-        help="Do not delete existing outputs under the experiment save folder.",
+        help="Do not delete any existing outputs under the experiment save folder (including old fold runs). "
+        "If omitted, previous fold run folders are removed but memar_features_cache/ is kept for reuse.",
     )
     parser.add_argument(
         "--mrmr-k",
@@ -542,7 +561,7 @@ def main() -> None:
     )
 
     if os.path.exists(save_folder) and not args.no_force and not args.memmap_only:
-        shutil.rmtree(save_folder)
+        _clear_experiment_outputs_keep_feature_cache(save_folder)
 
     description_hash = memmap_hash(memmap_description)
     dataset_dir = os.path.join(dataset_setting["memmap_directory"], description_hash)

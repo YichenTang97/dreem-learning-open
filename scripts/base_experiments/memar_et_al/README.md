@@ -35,6 +35,8 @@ python scripts/run_memar_et_al.py --workers 4 --no-force --skip-memmap-build
 
 Outputs are written under ``experiments/dodh/memar_et_al/``. Use ``--eeg-only`` or ``--all-eeg-channels`` to write under ``experiments/dodh/memar_et_al_eeg/`` (same convention as other EEG-focused runs).
 
+By default, re-running the script **keeps** ``memar_features_cache/`` (so you can resume after interrupting mRMR/RF); use ``--refresh-feature-cache`` to rebuild features, or ``--no-force`` to keep prior fold UUID folders too.
+
 Parallel folds (``--workers N``) use one process per fold. Use ``--skip-memmap-build`` so workers do not all run ``h5_to_memmaps``; use ``--no-force`` so they do not delete each other’s outputs. RandomForest defaults to ``n_jobs=-1`` (all cores per fold); set ``--rf-n-jobs`` to limit CPU when using many parallel folds. ``--clear-feature-cache-after`` removes the extracted-feature cache when the run finishes.
 
 Training logs six steps per fold (memmap index → feature extraction → KW → mRMR → RF fit → predict) with timings; ``tqdm`` bars run when ``--workers 1`` and not ``--quiet``. Use ``--quiet`` for warnings only.
