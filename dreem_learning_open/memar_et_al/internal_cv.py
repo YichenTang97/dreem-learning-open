@@ -69,6 +69,7 @@ def select_mrmr_n_estimators_subject_cv(
 
     grid_scores: Dict[Tuple[int, int], List[float]] = {}
 
+    grid = list(itertools.product(mk_grid, ne_grid))
     for mk, ne in grid:
         scores_fold: List[float] = []
         for inner_train_i, inner_val_i in fold_splits:
