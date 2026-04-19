@@ -507,7 +507,7 @@ def main() -> None:
     parser.add_argument(
         "--n-estimators-grid",
         type=str,
-        default="100,200,300,400,500",
+        default="100,200,300,400,500,600,700,800,900,1000",
         metavar="LIST",
         help="Comma-separated RandomForest n_estimators candidates (used with --internal-cv-k only).",
     )

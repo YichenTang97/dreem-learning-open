@@ -4,6 +4,9 @@ Subject-wise internal k-fold CV to choose mRMR size and RF ``n_estimators`` (Mem
 Outer evaluation remains LOSO on held-out test subjects. On the remaining training subjects,
 we split by **subject** (not by epoch) into k folds; each inner fold retrains KW + mRMR + RF on
 inner-train subjects only and scores on inner-validation subjects to avoid leakage.
+
+**Efficiency:** ``n_estimators`` does not affect mRMR. For each ``(mrmr_k, inner_fold)`` we run
+KW + mRMR once, then fit one RandomForest per ``n_estimators`` candidate on the same columns.
 """
 from __future__ import annotations
 
@@ -16,7 +19,11 @@ from sklearn.metrics import f1_score
 from sklearn.model_selection import KFold
 
 from dreem_learning_open.memar_et_al.feature_cache import stack_labeled_training_from_cache
-from dreem_learning_open.memar_et_al.pipeline import fit_memar_rf_pipeline, predict_memar_rf
+from dreem_learning_open.memar_et_al.pipeline import (
+    fit_rf_on_selected_columns,
+    kw_mrmr_select_columns,
+    predict_memar_rf,
+)
 
 
 def _macro_f1_scored_epochs(y_true: np.ndarray, y_pred: np.ndarray) -> float:
@@ -67,11 +74,10 @@ def select_mrmr_n_estimators_subject_cv(
     subject_idx = np.arange(n_subj)
     fold_splits = list(kf.split(subject_idx))
 
-    grid_scores: Dict[Tuple[int, int], List[float]] = {}
-
     grid = list(itertools.product(mk_grid, ne_grid))
-    for mk, ne in grid:
-        scores_fold: List[float] = []
+    grid_scores: Dict[Tuple[int, int], List[float]] = {(mk, ne): [] for mk, ne in grid}
+
+    for mk in mk_grid:
         for inner_train_i, inner_val_i in fold_splits:
             tr_paths = [train_records[j] for j in inner_train_i]
             va_paths = [train_records[j] for j in inner_val_i]
@@ -90,32 +96,34 @@ def select_mrmr_n_estimators_subject_cv(
                 feature_dim=feature_dim,
             )
             if X_tr.shape[0] == 0 or X_va.shape[0] == 0:
-                scores_fold.append(0.0)
+                for ne in ne_grid:
+                    grid_scores[(mk, ne)].append(0.0)
                 continue
-            rs = random_state + int(inner_train_i[0]) * 10007 + mk * 131 + ne
-            rf, _picked, cols = fit_memar_rf_pipeline(
-                X_tr,
-                y_tr,
-                all_names,
-                mrmr_k=mk,
-                n_estimators=ne,
-                kw_p=kw_p,
-                random_state=rs,
-                rf_n_jobs=rf_n_jobs,
-            )
-            pred = predict_memar_rf(X_va, rf, cols)
-            scores_fold.append(_macro_f1_scored_epochs(y_va, pred))
 
-        grid_scores[(mk, ne)] = scores_fold
-        if not quiet and show_progress:
-            log.info(
-                "%s | internal CV | mrmr_k=%d n_estimators=%d | mean macro-F1=%.4f (%d folds)",
-                fold_label,
-                mk,
-                ne,
-                float(np.nanmean(scores_fold)),
-                len(fold_splits),
+            rs_mrmr = random_state + int(inner_train_i[0]) * 10007 + mk * 131
+            _picked, cols = kw_mrmr_select_columns(
+                X_tr, y_tr, all_names, mk, kw_p, rs_mrmr
             )
+
+            for ne in ne_grid:
+                rs_rf = rs_mrmr + ne * 17
+                rf = fit_rf_on_selected_columns(
+                    X_tr, y_tr, cols, ne, rs_rf, rf_n_jobs
+                )
+                pred = predict_memar_rf(X_va, rf, cols)
+                grid_scores[(mk, ne)].append(_macro_f1_scored_epochs(y_va, pred))
+
+        if not quiet and show_progress:
+            for ne in ne_grid:
+                sc = grid_scores[(mk, ne)]
+                log.info(
+                    "%s | internal CV | mrmr_k=%d n_estimators=%d | mean macro-F1=%.4f (%d folds)",
+                    fold_label,
+                    mk,
+                    ne,
+                    float(np.nanmean(sc)),
+                    len(fold_splits),
+                )
 
     row_means = [
         (float(np.nanmean(sc)), mk, ne) for (mk, ne), sc in grid_scores.items()
@@ -144,5 +152,6 @@ def select_mrmr_n_estimators_subject_cv(
         "selected_mrmr_k": best_mk,
         "selected_n_estimators": best_ne,
         "best_mean_macro_f1": best_mean,
+        "internal_cv_note": "KW+mRMR once per (mrmr_k, inner_fold); RF refit per n_estimators only.",
     }
     return best_mk, best_ne, details
