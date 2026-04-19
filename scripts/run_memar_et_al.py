@@ -18,7 +18,8 @@ Features are computed **once per subject** and stored under
 ``<save_folder>/memar_features_cache/<key>/`` (compressed ``.npz``). Each LOSO fold loads from
 this cache for training and test. Use ``--refresh-feature-cache`` to force re-extraction.
 
-Use ``--all-eeg-channels`` for 104 features per EEG channel (concatenated). Parallelism:
+Use ``--all-eeg-channels`` for 104 features per EEG channel (concatenated); outputs go under
+``experiments/<dataset>/memar_et_al_eeg/`` (same convention as ``--eeg-only``). Parallelism:
 ``--feat-workers`` (subjects in parallel), ``--epoch-workers`` (epoch chunks within a subject;
 disabled when multiple subjects extract in parallel to avoid nested joblib pools), and
 ``--max-parallel`` to auto-tune both from CPU count. Kraskov uses ``scipy.spatial.cKDTree``;
@@ -531,9 +532,11 @@ def main() -> None:
     dataset_parameters = json.load(open(os.path.join(experiment_directory, "dataset.json")))
     dataset_parameter = dataset_parameters[0]
     dataset_setting = datasets[dataset]
-    save_folder = os.path.join(EXPERIMENTS_DIRECTORY, dataset, exp_name)
-    if args.eeg_only:
-        save_folder = os.path.join(EXPERIMENTS_DIRECTORY, dataset, exp_name + "_eeg")
+    # Same output root as other *_eeg experiments when using EEG-only memmaps or all-channel Memar features.
+    use_eeg_experiment_dir = bool(args.eeg_only or args.all_eeg_channels)
+    save_folder = os.path.join(
+        EXPERIMENTS_DIRECTORY, dataset, exp_name + ("_eeg" if use_eeg_experiment_dir else "")
+    )
 
     if os.path.exists(save_folder) and not args.no_force and not args.memmap_only:
         shutil.rmtree(save_folder)

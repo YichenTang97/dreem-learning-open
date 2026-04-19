@@ -33,6 +33,8 @@ python scripts/run_memar_et_al.py --folds 0 1 --no-force --skip-memmap-build
 python scripts/run_memar_et_al.py --workers 4 --no-force --skip-memmap-build
 ```
 
+Outputs are written under ``experiments/dodh/memar_et_al/``. Use ``--eeg-only`` or ``--all-eeg-channels`` to write under ``experiments/dodh/memar_et_al_eeg/`` (same convention as other EEG-focused runs).
+
 Parallel folds (``--workers N``) use one process per fold. Use ``--skip-memmap-build`` so workers do not all run ``h5_to_memmaps``; use ``--no-force`` so they do not delete each other’s outputs. By default each fold’s RandomForest uses ``n_jobs=1`` when ``workers > 1`` to limit CPU oversubscription; override with ``--rf-n-jobs``.
 
 Training logs six steps per fold (memmap index → feature extraction → KW → mRMR → RF fit → predict) with timings; ``tqdm`` bars run when ``--workers 1`` and not ``--quiet``. Use ``--quiet`` for warnings only.
