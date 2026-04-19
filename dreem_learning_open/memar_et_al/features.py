@@ -425,6 +425,55 @@ def extract_memar_features_vector(
     return out
 
 
+def channel_tag_for_feature_name(signal_path: str) -> str:
+    """Stable token for feature names (no slashes)."""
+    return signal_path.replace("\\", "/").replace("/", "__")
+
+
+def build_feature_names_multichannel(
+    bands_config: Dict[str, Any],
+    eeg_channel_paths: Sequence[str],
+) -> List[str]:
+    """
+    One Memar 104-vector per EEG channel, concatenated. Names: ``{ch}__{band}_{feat}``.
+    """
+    base_names = build_feature_names(bands_config)
+    names: List[str] = []
+    for sig in eeg_channel_paths:
+        tag = channel_tag_for_feature_name(sig)
+        for bn in base_names:
+            names.append("{}__{}".format(tag, bn))
+    assert len(names) == FEATURE_DIM * len(eeg_channel_paths)
+    return names
+
+
+def total_memar_feature_dim(n_eeg_channels: int) -> int:
+    return FEATURE_DIM * int(n_eeg_channels)
+
+
+def extract_memar_features_multichannel(
+    epoch_eeg: np.ndarray,
+    fs: float,
+    bands_config: Dict[str, Any] | None = None,
+    band_sos_list: List[np.ndarray | None] | None = None,
+) -> np.ndarray:
+    """
+    If ``epoch_eeg`` is 1-D, same as :func:`extract_memar_features_vector`.
+    If 2-D ``(n_samples, n_channels)``, compute 104 features per column and concatenate.
+    """
+    a = np.asarray(epoch_eeg, dtype=np.float64)
+    if a.ndim == 1:
+        return extract_memar_features_vector(a, fs, bands_config, band_sos_list)
+    if a.ndim != 2:
+        raise ValueError("epoch_eeg must be 1d or 2d, got shape {}".format(a.shape))
+    cfg = bands_config or load_bands_config()
+    parts = [
+        extract_memar_features_vector(a[:, c], fs, cfg, band_sos_list=band_sos_list)
+        for c in range(a.shape[1])
+    ]
+    return np.concatenate(parts, axis=0)
+
+
 def extract_memar_features_matrix(
     epochs: np.ndarray,
     fs: float,

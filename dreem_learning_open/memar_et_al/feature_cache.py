@@ -16,11 +16,16 @@ import numpy as np
 
 from dreem_learning_open.memar_et_al.features import (
     FEATURE_DIM,
-    extract_memar_features_vector,
+    extract_memar_features_multichannel,
     load_bands_config,
     precompute_band_sos_list,
+    total_memar_feature_dim,
 )
-from dreem_learning_open.memar_et_al.io import epoch_iterator, load_hypnogram
+from dreem_learning_open.memar_et_al.io import (
+    eeg_signal_order_from_memmap_desc,
+    epoch_iterator,
+    load_hypnogram,
+)
 
 CACHE_DIRNAME = "memar_features_cache"
 MANIFEST_NAME = "cache_manifest.json"
@@ -30,13 +35,20 @@ def compute_feature_cache_key(
     memmap_description: dict,
     eeg_channel: str,
     bands_config: Dict[str, Any],
+    all_eeg_channels: bool,
 ) -> str:
     """Short hash for cache directory name; invalidates when inputs change."""
     h = hashlib.sha1()
     h.update(json.dumps(memmap_description, sort_keys=True).encode("utf-8"))
     h.update(eeg_channel.encode("utf-8"))
     h.update(json.dumps(bands_config, sort_keys=True).encode("utf-8"))
-    h.update(str(FEATURE_DIM).encode("ascii"))
+    h.update(str(all_eeg_channels).encode("ascii"))
+    if all_eeg_channels:
+        order = eeg_signal_order_from_memmap_desc(memmap_description)
+        h.update(json.dumps(order, sort_keys=True).encode("utf-8"))
+        h.update(str(total_memar_feature_dim(len(order))).encode("ascii"))
+    else:
+        h.update(str(FEATURE_DIM).encode("ascii"))
     return h.hexdigest()[:24]
 
 
@@ -49,7 +61,14 @@ def _subject_npz_path(cache_dir: str, record_path: str) -> str:
     return os.path.join(cache_dir, "{}.npz".format(bn))
 
 
-def _npz_valid(npz_path: str, record_path: str) -> bool:
+def expected_feature_dim(memmap_description: dict, all_eeg_channels: bool) -> int:
+    if not all_eeg_channels:
+        return FEATURE_DIM
+    order = eeg_signal_order_from_memmap_desc(memmap_description)
+    return total_memar_feature_dim(len(order))
+
+
+def _npz_valid(npz_path: str, record_path: str, expected_dim: int) -> bool:
     if not os.path.isfile(npz_path):
         return False
     try:
@@ -58,35 +77,113 @@ def _npz_valid(npz_path: str, record_path: str) -> bool:
         z = np.load(npz_path)
         X = z["X"]
         y = z["y"]
-        if tuple(X.shape) != (n, FEATURE_DIM) or tuple(y.shape) != (n,):
+        if tuple(X.shape) != (n, expected_dim) or tuple(y.shape) != (n,):
             return False
-        if "feature_dim" in z.files and int(z["feature_dim"]) != FEATURE_DIM:
+        if "feature_dim" in z.files and int(z["feature_dim"]) != expected_dim:
             return False
     except Exception:
         return False
     return True
 
 
-def _extract_all_epochs_one_record(
+def _extract_epoch_chunk_ordered(
     record_path: str,
+    epoch_indices: np.ndarray,
     memmap_description: dict,
+    all_eeg_channels: bool,
     channel_signal: str | None,
     config_path: str | None,
     bands: dict,
     fs: float,
     band_sos_list: list,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """All epochs in fixed order (same as :func:`epoch_iterator`)."""
-    rows: list = []
-    labs: list = []
-    for _i, ep, lab in epoch_iterator(
-        record_path, memmap_description, channel_signal=channel_signal, config_path=config_path
+    want_set = {int(i) for i in np.asarray(epoch_indices).ravel()}
+    idx_to_vec: dict = {}
+    idx_to_lab: dict = {}
+    for i, ep, lab in epoch_iterator(
+        record_path,
+        memmap_description,
+        channel_signal=channel_signal,
+        config_path=config_path,
+        all_eeg_channels=all_eeg_channels,
     ):
-        rows.append(extract_memar_features_vector(ep, fs, bands, band_sos_list=band_sos_list))
-        labs.append(lab)
-    if not rows:
-        return np.zeros((0, FEATURE_DIM), dtype=np.float64), np.zeros((0,), dtype=np.int64)
-    return np.vstack(rows), np.asarray(labs, dtype=np.int64)
+        if i not in want_set:
+            continue
+        idx_to_vec[i] = extract_memar_features_multichannel(ep, fs, bands, band_sos_list=band_sos_list)
+        idx_to_lab[i] = lab
+        if len(idx_to_vec) == len(want_set):
+            break
+    if len(idx_to_vec) != len(want_set):
+        raise RuntimeError("incomplete epochs for {}".format(record_path))
+    X = np.vstack([idx_to_vec[int(i)] for i in epoch_indices])
+    y = np.asarray([idx_to_lab[int(i)] for i in epoch_indices], dtype=np.int64)
+    return X, y
+
+
+def _extract_all_epochs_one_record(
+    record_path: str,
+    memmap_description: dict,
+    all_eeg_channels: bool,
+    channel_signal: str | None,
+    config_path: str | None,
+    bands: dict,
+    fs: float,
+    band_sos_list: list,
+    epoch_inner_n_jobs: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """All epochs in order 0 .. n-1."""
+    hyp = load_hypnogram(record_path)
+    n_epochs = int(hyp.shape[0])
+    indices = np.arange(n_epochs, dtype=np.intp)
+    inner = max(1, int(epoch_inner_n_jobs))
+    if inner <= 1 or n_epochs <= 1:
+        return _extract_epoch_chunk_ordered(
+            record_path,
+            indices,
+            memmap_description,
+            all_eeg_channels,
+            channel_signal,
+            config_path,
+            bands,
+            fs,
+            band_sos_list,
+        )
+
+    from joblib import Parallel, delayed
+
+    chunks = np.array_split(indices, min(inner, n_epochs))
+    delayed_calls = [
+        delayed(_extract_epoch_chunk_ordered)(
+            record_path,
+            ch,
+            memmap_description,
+            all_eeg_channels,
+            channel_signal,
+            config_path,
+            bands,
+            fs,
+            band_sos_list,
+        )
+        for ch in chunks
+        if ch.size > 0
+    ]
+    parts = Parallel(n_jobs=inner, verbose=0)(delayed_calls)
+    X = np.vstack([p[0] for p in parts])
+    y = np.concatenate([p[1] for p in parts])
+    return X, y
+
+
+def _epoch_inner_effective(
+    feat_n_jobs_outer: int,
+    n_missing_subjects: int,
+    epoch_inner_requested: int,
+) -> int:
+    """Avoid nested joblib process pools: many subjects in parallel → no inner pool."""
+    if epoch_inner_requested <= 1:
+        return 1
+    if feat_n_jobs_outer > 1 and n_missing_subjects > 1:
+        return 1
+    return epoch_inner_requested
 
 
 def _write_manifest(
@@ -96,18 +193,24 @@ def _write_manifest(
     eeg_channel: str,
     bands_config: Dict[str, Any],
     n_records: int,
+    all_eeg_channels: bool,
+    feature_dim: int,
+    memmap_description: dict,
 ) -> None:
-    payload = {
+    payload: Dict[str, Any] = {
         "cache_key": cache_key,
         "memmap_hash": memmap_hash,
         "eeg_channel": eeg_channel,
-        "feature_dim": FEATURE_DIM,
+        "all_eeg_channels": all_eeg_channels,
+        "feature_dim": feature_dim,
         "bands_fs": float(bands_config["fs"]),
         "bands_sha1": hashlib.sha1(
             json.dumps(bands_config, sort_keys=True).encode("utf-8")
         ).hexdigest(),
         "n_subjects": n_records,
     }
+    if all_eeg_channels:
+        payload["eeg_signal_paths"] = eeg_signal_order_from_memmap_desc(memmap_description)
     with open(os.path.join(cache_dir, MANIFEST_NAME), "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
 
@@ -121,43 +224,88 @@ def ensure_memar_feature_cache(
     eeg_channel: str,
     memar_config_path: str | None,
     feat_n_jobs: int,
+    epoch_inner_n_jobs: int,
+    all_eeg_channels: bool,
     show_progress: bool,
     quiet: bool,
 ) -> None:
     """
     Ensure ``cache_dir`` contains one ``<subject_basename>.npz`` per record with keys
-    ``X`` (n_epochs, FEATURE_DIM), ``y`` (n_epochs,) hypnogram labels, ``feature_dim``.
-    Extracts only missing or invalid files.
+    ``X`` (n_epochs, feature_dim), ``y`` (n_epochs,) hypnogram labels, ``feature_dim``.
     """
     log = logging.getLogger("memar_et_al")
     os.makedirs(cache_dir, exist_ok=True)
     bands = load_bands_config()
     fs = float(bands["fs"])
     band_sos_list = precompute_band_sos_list(fs, bands)
+    exp_dim = expected_feature_dim(memmap_description, all_eeg_channels)
 
     missing: List[str] = []
     for rec in record_paths:
         p = _subject_npz_path(cache_dir, rec)
-        if not _npz_valid(p, rec):
+        if not _npz_valid(p, rec, exp_dim):
             missing.append(rec)
 
-    _write_manifest(cache_dir, cache_key, memmap_hash, eeg_channel, bands, len(record_paths))
+    _write_manifest(
+        cache_dir,
+        cache_key,
+        memmap_hash,
+        eeg_channel,
+        bands,
+        len(record_paths),
+        all_eeg_channels,
+        exp_dim,
+        memmap_description,
+    )
 
     if not missing:
         if not quiet:
             log.info(
-                "Feature cache | up to date | %d subjects at %s",
+                "Feature cache | up to date | %d subjects at %s (--feat-workers unused; nothing to extract)",
                 len(record_paths),
                 cache_dir,
             )
         return
 
+    n_missing = len(missing)
+    inner_eff = _epoch_inner_effective(feat_n_jobs, n_missing, epoch_inner_n_jobs)
+    effective_parallel = min(max(1, int(feat_n_jobs)), n_missing)
     if not quiet:
         log.info(
             "Feature cache | extracting %d / %d subjects (missing or stale) | %s",
-            len(missing),
+            n_missing,
             len(record_paths),
             cache_dir,
+        )
+        if feat_n_jobs != 1:
+            log.info(
+                "Feature cache | --feat-workers=%d → up to %d concurrent subjects (joblib processes)",
+                feat_n_jobs,
+                effective_parallel,
+            )
+        if epoch_inner_n_jobs > 1 and inner_eff == 1 and n_missing > 1:
+            log.info(
+                "Feature cache | --epoch-workers=%d disabled while extracting multiple subjects in parallel "
+                "(avoid nested joblib pools); use a single missing subject or --feat-workers 1 to enable.",
+                epoch_inner_n_jobs,
+            )
+        elif inner_eff > 1:
+            log.info(
+                "Feature cache | --epoch-workers=%d → per-subject epoch chunks (nested only when one subject extracts)",
+                inner_eff,
+            )
+
+    def _run_one(rec: str) -> Tuple[np.ndarray, np.ndarray]:
+        return _extract_all_epochs_one_record(
+            rec,
+            memmap_description,
+            all_eeg_channels,
+            eeg_channel if not all_eeg_channels else None,
+            memar_config_path,
+            bands,
+            fs,
+            band_sos_list,
+            inner_eff,
         )
 
     if feat_n_jobs == 1 or len(missing) == 1:
@@ -170,32 +318,13 @@ def ensure_memar_feature_cache(
             except ImportError:
                 pass
         for rec in rec_iter:
-            X, y = _extract_all_epochs_one_record(
-                rec,
-                memmap_description,
-                eeg_channel,
-                memar_config_path,
-                bands,
-                fs,
-                band_sos_list,
-            )
+            X, y = _run_one(rec)
             out = _subject_npz_path(cache_dir, rec)
-            np.savez_compressed(out, X=X, y=y, feature_dim=FEATURE_DIM)
+            np.savez_compressed(out, X=X, y=y, feature_dim=exp_dim)
     else:
         from joblib import Parallel, delayed
 
-        delayed_calls = [
-            delayed(_extract_all_epochs_one_record)(
-                rec,
-                memmap_description,
-                eeg_channel,
-                memar_config_path,
-                bands,
-                fs,
-                band_sos_list,
-            )
-            for rec in missing
-        ]
+        delayed_calls = [delayed(_run_one)(rec) for rec in missing]
         if show_progress:
             try:
                 from tqdm import tqdm
@@ -217,7 +346,7 @@ def ensure_memar_feature_cache(
 
         for rec, (X, y) in zip(missing, parts):
             out = _subject_npz_path(cache_dir, rec)
-            np.savez_compressed(out, X=X, y=y, feature_dim=FEATURE_DIM)
+            np.savez_compressed(out, X=X, y=y, feature_dim=exp_dim)
 
     if not quiet:
         log.info("Feature cache | done | %d subject files written under %s", len(missing), cache_dir)
@@ -228,6 +357,7 @@ def stack_labeled_training_from_cache(
     cache_dir: str,
     show_progress: bool,
     progress_desc: str,
+    feature_dim: int,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Concatenate labeled rows (hypnogram >= 0) from cached per-subject matrices."""
     xs: list = []
@@ -244,11 +374,17 @@ def stack_labeled_training_from_cache(
         z = np.load(_subject_npz_path(cache_dir, rec))
         X = z["X"]
         y = z["y"]
+        if X.shape[1] != feature_dim:
+            raise ValueError(
+                "cached feature_dim mismatch: expected {}, got {} for {}".format(
+                    feature_dim, X.shape[1], rec
+                )
+            )
         m = y >= 0
         xs.append(X[m])
         ys.append(y[m])
     if not xs:
-        return np.zeros((0, FEATURE_DIM), dtype=np.float64), np.zeros((0,), dtype=np.int64)
+        return np.zeros((0, feature_dim), dtype=np.float64), np.zeros((0,), dtype=np.int64)
     return np.vstack(xs), np.concatenate(ys)
 
 

@@ -17,7 +17,11 @@ Unless ``--quiet``, each fold still prints step logs and tqdm (stdout may interl
 Features are computed **once per subject** and stored under
 ``<save_folder>/memar_features_cache/<key>/`` (compressed ``.npz``). Each LOSO fold loads from
 this cache for training and test. Use ``--refresh-feature-cache`` to force re-extraction.
-Parallel extraction uses ``--feat-workers`` (joblib). Kraskov uses ``scipy.spatial.cKDTree``;
+
+Use ``--all-eeg-channels`` for 104 features per EEG channel (concatenated). Parallelism:
+``--feat-workers`` (subjects in parallel), ``--epoch-workers`` (epoch chunks within a subject;
+disabled when multiple subjects extract in parallel to avoid nested joblib pools), and
+``--max-parallel`` to auto-tune both from CPU count. Kraskov uses ``scipy.spatial.cKDTree``;
 Butterworth SOS are precomputed once per run.
 """
 from __future__ import annotations
@@ -45,13 +49,19 @@ from sklearn.metrics import accuracy_score, cohen_kappa_score, f1_score
 
 from dreem_learning_open.memar_et_al.config import default_memar_et_al_config_path, get_eeg_signal
 from dreem_learning_open.memar_et_al.feature_cache import (
-    ensure_memar_feature_cache,
-    feature_cache_path,
     compute_feature_cache_key,
+    ensure_memar_feature_cache,
+    expected_feature_dim,
+    feature_cache_path,
     load_cached_subject_matrix,
     stack_labeled_training_from_cache,
 )
-from dreem_learning_open.memar_et_al.features import build_feature_names, load_bands_config
+from dreem_learning_open.memar_et_al.features import (
+    build_feature_names,
+    build_feature_names_multichannel,
+    load_bands_config,
+)
+from dreem_learning_open.memar_et_al.io import eeg_signal_order_from_memmap_desc
 from dreem_learning_open.memar_et_al.selection import kruskal_wallis_mask, mrmr_select_features
 from dreem_learning_open.preprocessings.h5_to_memmap import h5_to_memmaps
 from dreem_learning_open.settings import DODH_SETTINGS, EXPERIMENTS_DIRECTORY
@@ -125,6 +135,8 @@ def run_fold(
     show_progress: bool = True,
     quiet: bool = False,
     feature_cache_dir: str = "",
+    all_eeg_channels: bool = False,
+    feature_dim: int = 104,
 ) -> str:
     log = _memar_logger(quiet)
     fold_label = "fold {}".format(fold_idx) if fold_idx is not None else "fold"
@@ -135,11 +147,14 @@ def run_fold(
     if not feature_cache_dir:
         raise ValueError("feature_cache_dir is required (populate feature cache before run_fold).")
     log.info(
-        "%s | start | test_subject=%s | train_subjects=%d | eeg=%s",
+        "%s | start | test_subject=%s | train_subjects=%d | eeg=%s | feature_dim=%d",
         fold_label,
         test_basename_preview,
         len(train_records),
-        eeg_channel,
+        ("all {} channels".format(len(eeg_signal_order_from_memmap_desc(memmap_description))))
+        if all_eeg_channels
+        else eeg_channel,
+        feature_dim,
     )
 
     dataset_dir = os.path.join(dataset_setting["memmap_directory"], memmap_hash(memmap_description))
@@ -150,7 +165,14 @@ def run_fold(
     )
 
     bands_cfg = load_bands_config()
-    all_names = build_feature_names(bands_cfg)
+    if all_eeg_channels:
+        all_names = build_feature_names_multichannel(
+            bands_cfg, eeg_signal_order_from_memmap_desc(memmap_description)
+        )
+    else:
+        all_names = build_feature_names(bands_cfg)
+    if len(all_names) != feature_dim:
+        raise RuntimeError("feature_dim mismatch: expected {} names, got {}".format(feature_dim, len(all_names)))
 
     log.info(
         "%s | step 2/6 | assembling training matrix from feature cache (%d subjects, labeled epochs)",
@@ -163,6 +185,7 @@ def run_fold(
         feature_cache_dir,
         show_progress=show_progress,
         progress_desc="{} train feats".format(fold_label),
+        feature_dim=feature_dim,
     )
     if X_train.shape[0] == 0:
         raise RuntimeError("No labeled training epochs for this fold.")
@@ -454,8 +477,9 @@ def main() -> None:
         type=int,
         default=None,
         metavar="N",
-        help="Parallel processes for step 2 (Memar features on training subjects). "
-        "Default: all logical CPUs when --workers 1; 1 when --workers > 1. Use 1 for sequential tqdm.",
+        help="Max parallel joblib processes while building the feature cache (one task per subject to extract). "
+        "You never get more concurrent workers than subjects missing from the cache; "
+        "joblib uses processes, not threads. Default: all logical CPUs when --workers 1; 1 when --workers > 1.",
     )
     parser.add_argument(
         "--quiet",
@@ -466,6 +490,25 @@ def main() -> None:
         "--refresh-feature-cache",
         action="store_true",
         help="Delete cached Memar .npz features for this memmap/EEG/bands key and re-extract all subjects.",
+    )
+    parser.add_argument(
+        "--all-eeg-channels",
+        action="store_true",
+        help="Memar features per EEG channel in the memmap (104 × n_channels); ignores single --eeg-signal.",
+    )
+    parser.add_argument(
+        "--epoch-workers",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Parallel joblib workers *within* each subject during cache extraction (epoch chunks). "
+        "Disabled automatically when multiple subjects extract in parallel (--feat-workers > 1). Default: 1.",
+    )
+    parser.add_argument(
+        "--max-parallel",
+        action="store_true",
+        help="Set --feat-workers and --epoch-workers from CPU count (~sqrt(N) subjects, ~N/sqrt epoch chunks). "
+        "Overrides --feat-workers and --epoch-workers when set.",
     )
     args = parser.parse_args()
 
@@ -541,10 +584,29 @@ def main() -> None:
     else:
         rf_n_jobs = args.rf_n_jobs
 
-    if args.feat_workers is None:
-        feat_n_jobs = 1 if args.workers > 1 else max(1, os.cpu_count() or 1)
+    c_cpu = os.cpu_count() or 1
+    if args.max_parallel:
+        s = max(1, int(round(c_cpu ** 0.5)))
+        feat_n_jobs = s
+        epoch_inner_n_jobs = max(1, c_cpu // s)
+        if not args.quiet:
+            print(
+                "max-parallel: --feat-workers={} --epoch-workers={} (logical CPUs ~{})".format(
+                    feat_n_jobs, epoch_inner_n_jobs, c_cpu
+                )
+            )
     else:
-        feat_n_jobs = max(1, int(args.feat_workers))
+        if args.feat_workers is None:
+            feat_n_jobs = 1 if args.workers > 1 else max(1, c_cpu)
+        else:
+            feat_n_jobs = max(1, int(args.feat_workers))
+        if args.epoch_workers is None:
+            epoch_inner_n_jobs = 1
+        else:
+            epoch_inner_n_jobs = max(1, int(args.epoch_workers))
+
+    all_eeg_channels = bool(args.all_eeg_channels)
+    eeg_key = "__all_eeg__" if all_eeg_channels else eeg_channel
 
     fold_jobs: list[dict] = []
     for i, fold in enumerate(folds):
@@ -570,12 +632,17 @@ def main() -> None:
                 "rf_n_jobs": rf_n_jobs,
                 "show_progress": not args.quiet,
                 "quiet": args.quiet,
+                "all_eeg_channels": all_eeg_channels,
+                "feature_dim": expected_feature_dim(memmap_description, all_eeg_channels),
             }
         )
 
     bands_cfg = load_bands_config()
-    feature_cache_key = compute_feature_cache_key(memmap_description, eeg_channel, bands_cfg)
+    feature_cache_key = compute_feature_cache_key(
+        memmap_description, eeg_key, bands_cfg, all_eeg_channels
+    )
     fcache_dir = feature_cache_path(save_folder, feature_cache_key)
+    feat_dim = expected_feature_dim(memmap_description, all_eeg_channels)
     if fold_jobs:
         _memar_logger(args.quiet)
         if args.refresh_feature_cache and os.path.isdir(fcache_dir):
@@ -586,9 +653,11 @@ def main() -> None:
             description_hash,
             available_dreem_records,
             memmap_description,
-            eeg_channel,
+            eeg_key,
             memar_config_path,
             feat_n_jobs,
+            epoch_inner_n_jobs,
+            all_eeg_channels,
             show_progress=not args.quiet,
             quiet=args.quiet,
         )
@@ -601,8 +670,12 @@ def main() -> None:
             fi = j["fold_idx"]
             tr = j["train_records"]
             print(
-                "Fold {} test={} train_subjects={} eeg_signal={}".format(
-                    fi, j["test_records"][0], len(tr), eeg_channel
+                "Fold {} test={} train_subjects={} eeg={} feat_dim={}".format(
+                    fi,
+                    j["test_records"][0],
+                    len(tr),
+                    ("all_eeg" if j.get("all_eeg_channels") else eeg_channel),
+                    j.get("feature_dim", feat_dim),
                 )
             )
             run_fold(**j)
@@ -623,8 +696,12 @@ def main() -> None:
                 fi = j["fold_idx"]
                 tr = j["train_records"]
                 print(
-                    "Submit fold {} test={} train_subjects={} eeg_signal={}".format(
-                        fi, j["test_records"][0], len(tr), eeg_channel
+                    "Submit fold {} test={} train_subjects={} eeg={} feat_dim={}".format(
+                        fi,
+                        j["test_records"][0],
+                        len(tr),
+                        ("all_eeg" if j.get("all_eeg_channels") else eeg_channel),
+                        j.get("feature_dim", feat_dim),
                     )
                 )
                 futs.append((fi, executor.submit(_run_fold_unpack, j)))
