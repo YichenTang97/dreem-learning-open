@@ -410,11 +410,33 @@ def print_summary(records_data: List[Dict]) -> None:
     print(f"{'='*65}\n")
 
 
+def _aggregate_metrics_across_scorers(per_scorer: Dict[str, Dict]) -> Dict:
+    """Mean and std of each aggregate SOL metric across scorers (same keys as compute_sol_metrics)."""
+    scorer_ids = sorted(per_scorer.keys())
+    metric_keys = ("mae_min", "rmse_min", "bias_min", "std_err_min", "pearson_r")
+    out: Dict = {"n_scorers": len(scorer_ids)}
+    for k in metric_keys:
+        vals = []
+        for sid in scorer_ids:
+            m = per_scorer.get(sid) or {}
+            v = m.get(k)
+            if v is None:
+                continue
+            fv = float(v)
+            if k == "pearson_r" and np.isnan(fv):
+                continue
+            vals.append(fv)
+        out[f"mean_{k}"] = float(np.mean(vals)) if vals else None
+        out[f"std_{k}"] = float(np.std(vals)) if vals else None
+    return out
+
+
 def _build_human_scorer_benchmark(records_data: List[Dict]) -> Optional[Dict]:
     """
     Build scorer-only SOL benchmark to be stored with target artifacts:
       - each scorer vs leave-one-out mean of other scorers
-      - aggregate human baseline MAE
+      - each scorer vs mean of all scorers (same reference as model_vs_human_mean)
+      - aggregate human metrics (mean ± std across scorers) for MAE, RMSE, bias, SD(err), r
       - per-record mean SOL across human scorers (for later model comparison)
     """
     scorer_tables: Dict[str, Dict[str, Optional[float]]] = {}
@@ -449,6 +471,12 @@ def _build_human_scorer_benchmark(records_data: List[Dict]) -> Optional[Dict]:
             loo_ref[rid] = float(np.mean(vals)) if vals else None
         per_scorer_vs_loo[scorer_id] = compute_sol_metrics(scorer_tables[scorer_id], loo_ref)
 
+    per_scorer_vs_mean_all: Dict[str, Dict] = {}
+    for scorer_id in scorer_ids:
+        per_scorer_vs_mean_all[scorer_id] = compute_sol_metrics(
+            scorer_tables[scorer_id], per_record_mean_sol
+        )
+
     scorer_maes = [
         m["mae_min"] for m in per_scorer_vs_loo.values() if m.get("mae_min") is not None
     ]
@@ -460,6 +488,9 @@ def _build_human_scorer_benchmark(records_data: List[Dict]) -> Optional[Dict]:
         "scorer_ids": scorer_ids,
         "per_record_mean_sol_min": per_record_mean_sol,
         "per_scorer_vs_loo_mean": per_scorer_vs_loo,
+        "per_scorer_vs_mean_all": per_scorer_vs_mean_all,
+        "human_aggregate_vs_loo_mean": _aggregate_metrics_across_scorers(per_scorer_vs_loo),
+        "human_aggregate_vs_mean_all": _aggregate_metrics_across_scorers(per_scorer_vs_mean_all),
         "human_baseline_mae": {
             "mean_mae_min": float(np.mean(scorer_maes)) if scorer_maes else None,
             "std_mae_min": float(np.std(scorer_maes)) if scorer_maes else None,

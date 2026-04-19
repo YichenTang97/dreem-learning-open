@@ -41,7 +41,12 @@ SOL artifacts are written under `BASE_DIRECTORY/sol/`.
    - Writes fold outputs under `sol/finetuned/<dataset>/<base_model>_<tag>/fold_XX/`.
 
 4. **Re-evaluate after finetune (per fold)**
-   - Run `evaluate_sol.py` on the fine-tuned outputs with the same SOL reference logic.
+   - If outputs use the default tree `sol/finetuned/<dataset>/<subfolder>/`, run
+     `evaluate_sol.py --finetuned --model <subfolder>` (same name as the directory;
+     `exp_dir` is inferred from `sol_config.finetuned_run_dir`).
+   - If you used a custom `--out_dir` for finetuning, add `--exp_dir` pointing at that root.
+   - Results go under `sol/evaluations/<dataset>/<basename(exp_dir)>/` (distinct from
+     pretrained `sol/evaluations/.../<base_model>/`).
    - Enables direct before/after SOL comparison with identical fold structure.
 
 Fold identity is mapped from pretraining metadata so held-out record alignment is preserved.
@@ -95,7 +100,21 @@ These per-scorer results are stored under:
 
 - `sol_targets.json` -> `_scorer_vs_mean_benchmark.per_scorer_vs_loo_mean`
 
-A human baseline summary is also stored:
+For each scorer `i`, the same aggregate metrics (`mae_min`, `rmse_min`, `bias_min`,
+`std_err_min`, `pearson_r`) against **`MeanAll`** (the same reference as the model)
+are stored under:
+
+- `_scorer_vs_mean_benchmark.per_scorer_vs_mean_all`
+
+Rollups across scorers (mean and standard deviation of each metric) are stored as:
+
+- `_scorer_vs_mean_benchmark.human_aggregate_vs_loo_mean` — LOO reference (same
+  metrics as per-scorer LOO, summarized across scorers). **This is the default
+  human baseline in `evaluate_sol.py` prints** (alongside the model vs `MeanAll`).
+- `_scorer_vs_mean_benchmark.human_aggregate_vs_mean_all` — `MeanAll` reference
+  (same metric definitions as `model_vs_human_mean`, for optional same-reference analysis).
+
+A compact MAE-only summary (LOO) is kept for backward compatibility:
 
 - `_scorer_vs_mean_benchmark.human_baseline_mae.mean_mae_min`
 - `_scorer_vs_mean_benchmark.human_baseline_mae.std_mae_min`
@@ -126,8 +145,14 @@ This is reported as:
 
 ### Why this metric is useful
 
-- Human scorers are not compared to themselves (LOO reference for humans).
+- Human scorers are not compared to themselves when using the LOO reference.
 - Model comparison uses a stable dataset-wide human reference (`MeanAll`).
+- **`evaluate_sol.py` prints the human column using the LOO framework** (rollup
+  `human_aggregate_vs_loo_mean`): same metric definitions as for the model, but
+  the human baseline matches the standard inter-rater benchmark (scorer vs mean
+  of the other scorers). The model column remains vs `MeanAll`.
+- For same-reference-as-model human summaries (each scorer vs `MeanAll`), see
+  `human_aggregate_vs_mean_all` and `per_scorer_vs_mean_all` in `sol_targets.json`.
 - Human and model results are on the same error scale (minutes), enabling direct
   interpretation of whether model performance is within expert variability.
 
@@ -151,6 +176,6 @@ python sol_experiments/evaluate_sol.py --dataset dodh --model simple_sleep_net
 # 3) Fine-tune for SOL
 python sol_experiments/finetune_sol.py --dataset dodh --base_model simple_sleep_net
 
-# 4) Re-evaluate fine-tuned outputs
-python sol_experiments/evaluate_sol.py --dataset dodh --exp_dir "data/sol/finetuned/dodh/simple_sleep_net_ft_c10m_a0.50"
+# 4) Re-evaluate fine-tuned outputs (default layout: --model = finetuned subfolder name)
+python sol_experiments/evaluate_sol.py --dataset dodh --model simple_sleep_net_ft_c10m_a0.50 --finetuned
 ```

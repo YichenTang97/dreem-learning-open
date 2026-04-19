@@ -217,6 +217,7 @@ def soft_sol_minutes(logits: "torch.Tensor",
 
 def sol_finetune_loss(logits: "torch.Tensor",
                       hypnogram: "torch.Tensor",
+                      true_sol_minutes: float,
                       true_sol_epochs: int,
                       cutoff_epochs: int,
                       alpha: float = 0.5,
@@ -224,14 +225,20 @@ def sol_finetune_loss(logits: "torch.Tensor",
     """
     Combined staging cross-entropy + differentiable SOL loss for fine-tuning.
 
-    Only epochs in [0, true_sol_epochs + cutoff_epochs) are used.
+    Only epochs in [0, true_sol_epochs + cutoff_epochs) are used (peri-onset window).
 
     Parameters
     ----------
     logits       : Tensor (T, n_class)   — model output for the window
     hypnogram    : Tensor (T,) long      — true sleep stage labels
-    true_sol_epochs : int                — true SOL expressed in epochs
-    cutoff_epochs   : int                — how many epochs past SOL to include
+    true_sol_minutes : float             — reference SOL in minutes (use expert
+                      consensus, i.e. mean of per-scorer SOLs from ``sol_targets``).
+                      This is the target for the differentiable SOL term; it must not
+                      be reconstructed from epoch indices (which would quantize it).
+    true_sol_epochs : int               — same reference SOL rounded to an epoch index;
+                      used only to set the training window length together with
+                      ``cutoff_epochs``.
+    cutoff_epochs   : int                — epochs after SOL to include in the window
     alpha        : float                 — weight of the staging CE loss
                                            (1-alpha) for the SOL loss
     epoch_duration_s : int
@@ -252,12 +259,12 @@ def sol_finetune_loss(logits: "torch.Tensor",
         ce_loss = torch.nn.functional.cross_entropy(
             window_logits[mask], window_hyp[mask])
 
-    # --- Differentiable SOL loss ---
+    # --- Differentiable SOL loss (match consensus float, not epoch-quantized minutes) ---
     pred_sol_min = soft_sol_minutes(window_logits, epoch_duration_s)
-    true_sol_min = torch.tensor(
-        true_sol_epochs * epoch_duration_s / 60.0,
+    ref_sol_min = torch.tensor(
+        float(true_sol_minutes),
         device=logits.device, dtype=logits.dtype)
-    sol_loss = torch.abs(pred_sol_min - true_sol_min)
+    sol_loss = torch.abs(pred_sol_min - ref_sol_min)
 
     return alpha * ce_loss + (1.0 - alpha) * sol_loss
 

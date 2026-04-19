@@ -56,6 +56,8 @@ from sol_experiments.sol_config import (
     FINETUNE_DEFAULTS,
     exp_dir as default_exp_dir,
     finetune_dir as default_finetune_dir,
+    finetuned_run_dir,
+    normalize_base_model_for_finetune_tag,
     sol_targets_path as default_targets_path,
     print_config,
     to_base_directory_relative,
@@ -141,7 +143,8 @@ def finetune_step(
     if true_sol_min is None:
         return None
 
-    true_sol_epochs = int(round(true_sol_min * 60.0 / epoch_duration_s))
+    # Epoch index for peri-onset window only; SOL loss uses float consensus_sol_min below.
+    true_sol_epochs = int(round(float(true_sol_min) * 60.0 / epoch_duration_s))
     cutoff_epochs   = int(round(cutoff_minutes * 60.0 / epoch_duration_s))
     window_end      = true_sol_epochs + cutoff_epochs
 
@@ -186,6 +189,7 @@ def finetune_step(
     optimizer.zero_grad()
     loss = sol_finetune_loss(
         logits=logits_seq, hypnogram=labels_seq,
+        true_sol_minutes=true_sol_min,
         true_sol_epochs=true_sol_epochs, cutoff_epochs=cutoff_epochs,
         alpha=alpha, epoch_duration_s=epoch_duration_s,
     )
@@ -620,11 +624,20 @@ def run_finetune(args: argparse.Namespace) -> None:
         print(f"  Test SOL MAE : {np.mean(valid_maes):.2f} ± {np.std(valid_maes):.2f} min "
               f"over {len(valid_maes)} fold(s)")
     print(f"  Results in   : {resolved_out}")
-    print(f"\n  Next step (point at the fine-tuned run directory):")
-    print(f"    python sol_experiments/evaluate_sol.py \\")
-    print(f"        --dataset {args.dataset} \\")
-    print(f"        --exp_dir {resolved_out} \\")
-    print(f"        --model {os.path.basename(resolved_out.rstrip(os.sep))}\n")
+    sub_name = os.path.basename(os.path.normpath(resolved_out))
+    default_ft = finetuned_run_dir(args.dataset, sub_name)
+    print(f"\n  Next: evaluate fine-tuned hypnograms vs expert SOL (rollup):")
+    if os.path.abspath(resolved_out) == os.path.abspath(default_ft):
+        print(f"    python sol_experiments/evaluate_sol.py \\")
+        print(f"        --dataset {args.dataset} \\")
+        print(f"        --model {sub_name} \\")
+        print(f"        --finetuned\n")
+    else:
+        print(f"    python sol_experiments/evaluate_sol.py \\")
+        print(f"        --dataset {args.dataset} \\")
+        print(f"        --model {sub_name} \\")
+        print(f"        --finetuned \\")
+        print(f"        --exp_dir {resolved_out}\n")
 
     summary = {
         "base_model": args.base_model, "dataset": args.dataset,
@@ -641,6 +654,16 @@ def run_finetune(args: argparse.Namespace) -> None:
 
 
 def main(args: argparse.Namespace) -> None:
+    bm = normalize_base_model_for_finetune_tag(args.base_model)
+    if bm != args.base_model:
+        print(
+            "NOTE: --base_model {!r} -> {!r} (use the pretrained folder name under "
+            "EXPERIMENTS_DIRECTORY/<dataset>/, not the finetuned output subfolder).".format(
+                args.base_model, bm
+            )
+        )
+        args.base_model = bm
+
     # Worker mode runs the core logic directly.
     if args._worker:
         run_finetune(args)

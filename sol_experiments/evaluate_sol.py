@@ -8,8 +8,15 @@ reference, **per held-out fold** (same leave-one-subject-out split as pretrainin
 
 Works on ``hypnograms.json`` under each run UUID in ``EXPERIMENTS_DIRECTORY``.
 
-Minimal usage:
+Minimal usage (pretrained staging runs under ``EXPERIMENTS_DIRECTORY``):
     python sol_experiments/evaluate_sol.py
+
+Finetuned models under the default layout (``sol/finetuned/<dataset>/<subfolder>/``):
+    python sol_experiments/evaluate_sol.py --dataset dodh \\
+        --model simple_sleep_net_ft_c10m_a0.50 --finetuned
+
+    ``--model`` is the finetuned subfolder name; ``--exp_dir`` defaults to that path.
+    Override ``--exp_dir`` if the run lives elsewhere.
 
 Custom usage:
     python sol_experiments/evaluate_sol.py \\
@@ -18,7 +25,8 @@ Custom usage:
         --exp_dir /custom/experiment/dir/ \\
         --base-experiments-dir scripts/base_experiments
 
-**Outputs** (under ``BASE_DIRECTORY/sol/evaluations/<dataset>/<model>/``):
+**Outputs** (under ``BASE_DIRECTORY/sol/evaluations/<dataset>/<name>/``; ``<name>`` is
+``--model`` for pretrained runs, or the finetuned folder name when ``--finetuned``):
   - ``fold_XX/sol_eval.json`` — metrics for that LOSO fold
   - ``summary.json`` — rollup across folds (unless ``--out`` overrides summary path)
 
@@ -49,6 +57,8 @@ from sol_experiments.sol_config import (
     DATASET_SETTINGS,
     EVALUATE_DEFAULTS,
     exp_dir as default_exp_dir,
+    finetuned_run_dir,
+    normalize_base_model_for_finetune_tag,
     print_config,
     sol_eval_fold_dir,
     sol_eval_summary_path,
@@ -107,6 +117,15 @@ def _align_target_to_prediction(pred: np.ndarray, target: np.ndarray) -> Tuple[n
 UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
+
+def _staging_model_name(model_arg: str, finetuned: bool) -> str:
+    """
+    Folder name under EXPERIMENTS_DIRECTORY / base_experiments for memmaps and fold metadata.
+    If --finetuned and model_arg is the finetuned subfolder name, strip ``_ft_c…m_a…`` suffix(es).
+    """
+    if not finetuned:
+        return model_arg
+    return normalize_base_model_for_finetune_tag(model_arg)
 
 
 def _extract_record_id(key: str) -> Optional[str]:
@@ -255,7 +274,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--model",
         default=EVALUATE_DEFAULTS["model"],
-        help="Experiment folder name under EXPERIMENTS_DIRECTORY/<dataset>/.",
+        help=(
+            "Without --finetuned: pretrained folder under EXPERIMENTS_DIRECTORY/<dataset>/ "
+            "(memmaps / fold index). With --finetuned: subfolder name under "
+            "sol/finetuned/<dataset>/ (e.g. simple_sleep_net_ft_c10m_a0.50); the leading "
+            "base name before _ft_c… is used for memmaps. Use --exp_dir to override location."
+        ),
     )
     p.add_argument(
         "--dataset",
@@ -263,10 +287,31 @@ def build_parser() -> argparse.ArgumentParser:
         choices=list(DATASET_SETTINGS.keys()),
     )
     p.add_argument(
+        "--finetuned",
+        action="store_true",
+        help=(
+            "Hypnograms from SOL fine-tuning (fold_XX/hypnograms.json). Default exp_dir is "
+            "sol/finetuned/<dataset>/<model>/ where --model is the finetuned subfolder "
+            "(same layout as finetune_sol default --out_dir). Pass --exp_dir to use another path."
+        ),
+    )
+    p.add_argument(
+        "--eval_model",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Folder name under sol/evaluations/<dataset>/ for this run. "
+            "Default: --model for pretrained; for --finetuned, the basename of --exp_dir."
+        ),
+    )
+    p.add_argument(
         "--exp_dir",
         default=None,
-        help="Pretrained experiment root (UUID run dirs). "
-        "Default: EXPERIMENTS_DIRECTORY/<dataset>/<model>/",
+        help=(
+            "Root directory containing fold_XX/ trees with hypnograms.json. "
+            "Default without --finetuned: EXPERIMENTS_DIRECTORY/<dataset>/<model>/. "
+            "With --finetuned: default is sol/finetuned/<dataset>/<model>/ (see sol_config)."
+        ),
     )
     p.add_argument(
         "--base-experiments-dir",
@@ -295,20 +340,35 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(args: argparse.Namespace) -> None:
-    resolved_exp_dir = args.exp_dir or default_exp_dir(args.dataset, args.model)
+    staging_model = _staging_model_name(args.model, args.finetuned)
+    if args.finetuned:
+        resolved_exp_dir = args.exp_dir or finetuned_run_dir(args.dataset, args.model)
+    else:
+        resolved_exp_dir = args.exp_dir or default_exp_dir(args.dataset, args.model)
+
+    if args.eval_model:
+        eval_model_name = args.eval_model
+    elif args.finetuned:
+        eval_model_name = os.path.basename(os.path.normpath(resolved_exp_dir))
+    else:
+        eval_model_name = args.model
+
     resolved_targets = args.sol_targets or default_targets_path(args.dataset)
-    summary_out = args.out or sol_eval_summary_path(args.dataset, args.model)
+    summary_out = args.out or sol_eval_summary_path(args.dataset, eval_model_name)
 
     memmap_desc = load_memmap_description(
-        args.base_experiments_dir, args.model, args.dataset
+        args.base_experiments_dir, staging_model, args.dataset
     )
     fold_map = build_loov_fold_map(DATASET_SETTINGS[args.dataset], memmap_desc)
 
     print_config(
         "evaluate_sol.py",
         {
-            "model": args.model,
+            "model (CLI)": args.model,
+            "staging_model (memmaps)": staging_model,
+            "eval_model (outputs)": eval_model_name,
             "dataset": args.dataset,
+            "finetuned": args.finetuned,
             "exp_dir": resolved_exp_dir,
             "base_experiments_dir": args.base_experiments_dir,
             "sol_targets": resolved_targets,
@@ -319,7 +379,13 @@ def main(args: argparse.Namespace) -> None:
 
     if not os.path.isdir(resolved_exp_dir):
         print("ERROR: exp_dir not found: {}".format(resolved_exp_dir))
-        print("  Run scripts/run_cnn_rnn.py or run_base_experiments.py first.")
+        if args.finetuned:
+            print(
+                "  Check --model matches the finetuned subfolder under sol/finetuned/<dataset>/, "
+                "or pass --exp_dir explicitly."
+            )
+        else:
+            print("  Run scripts/run_cnn_rnn.py or run_base_experiments.py first.")
         sys.exit(1)
     if not os.path.exists(resolved_targets):
         print("ERROR: sol_targets not found: {}".format(resolved_targets))
@@ -379,9 +445,9 @@ def main(args: argparse.Namespace) -> None:
         acc = mean_staging_accuracy(hyp_path)
         fold_metrics = compute_sol_metrics(pred_sols, ref_sols)
 
-        fold_dir = sol_eval_fold_dir(args.dataset, args.model, fold_idx)
+        fold_dir = sol_eval_fold_dir(args.dataset, eval_model_name, fold_idx)
         fold_payload = {
-            "model": args.model,
+            "model": eval_model_name,
             "dataset": args.dataset,
             "fold_idx": fold_idx,
             "test_record": test_record,
@@ -414,7 +480,7 @@ def main(args: argparse.Namespace) -> None:
 
     print("\n{}".format("=" * 65))
     print("  SOL EVALUATION (LOSOCV rollup)  —  {}  ({})".format(
-        args.model.upper(), args.dataset.upper()
+        eval_model_name.upper(), args.dataset.upper()
     ))
     print("{}".format("=" * 65))
     n = metrics.get("n_valid", 0)
@@ -432,12 +498,39 @@ def main(args: argparse.Namespace) -> None:
         print("  Pearson r    : {:.3f}".format(metrics["pearson_r"]))
 
     if scorer_benchmark and scorer_benchmark.get("model_vs_human_mean", {}).get("mae_min") is not None:
-        model_mae = scorer_benchmark["model_vs_human_mean"]["mae_min"]
-        human_mean_mae = scorer_benchmark["human_baseline_mae"]["mean_mae_min"]
-        print("\n  Side-by-side scorer benchmark")
-        print("  Model MAE vs human-mean ref : {:.2f} min".format(model_mae))
-        if human_mean_mae is not None:
-            print("  Human scorer MAE (avg, LOO) : {:.2f} min".format(human_mean_mae))
+        mv = scorer_benchmark["model_vs_human_mean"]
+        # Default human baseline: LOO reference (same framework as per-scorer human benchmark).
+        ha = scorer_benchmark.get("human_aggregate_vs_loo_mean") or {}
+        print("\n  Side-by-side benchmark")
+        print("  Model: vs MeanAll.  Human: vs leave-one-out mean (mean±std across scorers).")
+        print("  {:<14} {:>12}  {:>22}".format("Metric", "Model", "Human (LOO)"))
+        for key, label in (
+            ("mae_min", "MAE (min)"),
+            ("rmse_min", "RMSE (min)"),
+            ("bias_min", "Bias (min)"),
+            ("std_err_min", "SD(err) (min)"),
+            ("pearson_r", "Pearson r"),
+        ):
+            mv_val = mv.get(key)
+            hm = ha.get("mean_{}".format(key))
+            hs = ha.get("std_{}".format(key))
+            if key == "pearson_r":
+                m_str = "{:.3f}".format(mv_val) if mv_val is not None else "—"
+                if hm is not None and hs is not None:
+                    h_str = "{:.3f} ± {:.3f}".format(hm, hs)
+                elif hm is not None:
+                    h_str = "{:.3f}".format(hm)
+                else:
+                    h_str = "—"
+            else:
+                m_str = "{:.2f}".format(mv_val) if mv_val is not None else "—"
+                if hm is not None and hs is not None:
+                    h_str = "{:.2f} ± {:.2f}".format(hm, hs)
+                elif hm is not None:
+                    h_str = "{:.2f}".format(hm)
+                else:
+                    h_str = "—"
+            print("  {:<14} {:>12}  {:>22}".format(label, m_str, h_str))
 
     valid_n1 = [v for v in all_n1_f1.values() if v is not None]
     if valid_n1:
@@ -453,7 +546,10 @@ def main(args: argparse.Namespace) -> None:
     print("{}\n".format("=" * 65))
 
     summary_payload = {
-        "model": args.model,
+        "model": eval_model_name,
+        "base_model": staging_model,
+        "model_arg": args.model,
+        "finetuned": bool(args.finetuned),
         "dataset": args.dataset,
         "exp_dir": to_base_directory_relative(resolved_exp_dir),
         "sol_targets": to_base_directory_relative(resolved_targets),

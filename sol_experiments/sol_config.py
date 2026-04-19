@@ -22,9 +22,27 @@ Paths come from ``dreem_learning_open.settings`` (``BASE_DIRECTORY``,
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 from typing import Optional
+
+# Matches a default SOL finetune output suffix (see finetune_dir tag format).
+_FT_TAG_SUFFIX_RE = re.compile(r"^(.+)_ft_c\d+m_a\d+\.\d{2}$")
+
+
+def normalize_base_model_for_finetune_tag(base_model: str) -> str:
+    """
+    If ``base_model`` already ends with a finetune tag (e.g. user passed the finetuned
+    folder name instead of the pretrained folder name), strip it so ``finetune_dir``
+    does not build ``..._ft_c10m_a0.50_ft_c10m_a0.50``. Strips repeatedly if needed.
+    """
+    cur = base_model.strip()
+    while True:
+        m = _FT_TAG_SUFFIX_RE.match(cur)
+        if not m:
+            return cur
+        cur = m.group(1)
 
 _REPO_ROOT_FOR_IMPORT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT_FOR_IMPORT not in sys.path:
@@ -130,6 +148,17 @@ def exp_dir(dataset: str = "dodh", model: str = "cnn_rnn") -> str:
     return os.path.join(EXPERIMENTS_DIRECTORY, dataset, model)
 
 
+def finetuned_run_dir(dataset: str, subfolder_name: str) -> str:
+    """
+    Default layout for fine-tuned SOL runs: ``SOL_DIRECTORY/finetuned/<dataset>/<subfolder>/``.
+
+    ``subfolder_name`` is the directory name only (for example the default
+    ``<base_model>_ft_c10m_a0.50`` from :func:`finetune_dir`, or any custom name from
+    ``finetune_sol --out_dir``).
+    """
+    return os.path.join(SOL_FINETUNED_ROOT, dataset, subfolder_name)
+
+
 def finetune_dir(
     dataset: str = "dodh",
     base_model: str = "cnn_rnn",
@@ -140,8 +169,10 @@ def finetune_dir(
     Root directory for SOL fine-tuning outputs (contains ``fold_XX/`` per LOSO fold).
     Lives under ``SOL_DIRECTORY/finetuned``, not under EXPERIMENTS_DIRECTORY.
     """
+    base = normalize_base_model_for_finetune_tag(base_model)
     tag = "ft_c{:.0f}m_a{:.2f}".format(cutoff_minutes, alpha)
-    p = os.path.join(SOL_FINETUNED_ROOT, dataset, "{}_{}".format(base_model, tag))
+    sub = "{}_{}".format(base, tag)
+    p = finetuned_run_dir(dataset, sub)
     os.makedirs(p, exist_ok=True)
     return p
 
