@@ -2,8 +2,11 @@
 Memar & Faradji (2018) classical RF baseline (`memar_et_al`): 104 features, KW + mRMR + RF, LOSO.
 
 Matches **subject cross-validation** (paper Sec. VIII-B): one subject held out for testing;
-**all other subjects** are used for Kruskal–Wallis + mRMR + RF training (no held-out
-validation split). Default ``--mrmr-k 40`` and ``--n-estimators 100`` follow the paper.
+**all other subjects** are used for Kruskal–Wallis + mRMR + RF training. Default ``--mrmr-k 40``
+and ``--n-estimators 100`` match the paper when not using ``--internal-cv-k``. With
+``--internal-cv-k K`` (K≥2), a **subject-wise K-fold** on training subjects grids over
+``--mrmr-k-grid`` and ``--n-estimators-grid`` and picks the pair with best mean macro-F1
+(then refits on all training subjects), matching the paper’s internal CV for RF/mRMR settings.
 
 Run from repository root with the package on PYTHONPATH or installed::
 
@@ -51,7 +54,6 @@ import uuid
 import git
 import joblib
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, cohen_kappa_score, f1_score
 
 from dreem_learning_open.memar_et_al.config import default_memar_et_al_config_path, get_eeg_signal
@@ -70,7 +72,8 @@ from dreem_learning_open.memar_et_al.features import (
     load_bands_config,
     memar_multichannel_eeg_paths,
 )
-from dreem_learning_open.memar_et_al.selection import kruskal_wallis_mask, mrmr_select_features
+from dreem_learning_open.memar_et_al.internal_cv import select_mrmr_n_estimators_subject_cv
+from dreem_learning_open.memar_et_al.pipeline import fit_memar_rf_pipeline, predict_memar_rf
 from dreem_learning_open.preprocessings.h5_to_memmap import h5_to_memmaps
 from dreem_learning_open.settings import DODH_SETTINGS, EXPERIMENTS_DIRECTORY
 from dreem_learning_open.utils.memmap_eeg import filter_memmap_signals_eeg_only
@@ -84,6 +87,14 @@ def memmap_directory_ready(memmaps_dir: str) -> bool:
     return os.path.isfile(os.path.join(memmaps_dir, "groups_description.json")) and os.path.isfile(
         os.path.join(memmaps_dir, "features_description.json")
     )
+
+
+def _parse_csv_positive_ints(s: str) -> list[int]:
+    """Parse ``"40,100,200"`` → ``[40, 100, 200]``."""
+    out = [int(x.strip()) for x in s.split(",") if x.strip()]
+    if not out or any(x < 1 for x in out):
+        raise ValueError("expected comma-separated positive integers, got {!r}".format(s))
+    return out
 
 
 def _to_rel(p: str) -> str:
@@ -145,6 +156,9 @@ def run_fold(
     feature_cache_dir: str = "",
     all_eeg_channels: bool = False,
     feature_dim: int = 104,
+    internal_cv_k: int = 0,
+    mrmr_k_grid: list | None = None,
+    n_estimators_grid: list | None = None,
 ) -> str:
     log = _memar_logger(quiet)
     fold_label = "fold {}".format(fold_idx) if fold_idx is not None else "fold"
@@ -166,7 +180,7 @@ def run_fold(
     )
 
     dataset_dir = os.path.join(dataset_setting["memmap_directory"], memmap_hash(memmap_description))
-    log.info("%s | step 1/6 | reading memmap index (groups_description, features_description)", fold_label)
+    log.info("%s | step 1/5 | reading memmap index (groups_description, features_description)", fold_label)
     groups_description = json.load(open(os.path.join(dataset_dir, "groups_description.json")))
     features_description = json.load(
         open(os.path.join(dataset_dir, "features_description.json"))
@@ -183,7 +197,7 @@ def run_fold(
         raise RuntimeError("feature_dim mismatch: expected {} names, got {}".format(feature_dim, len(all_names)))
 
     log.info(
-        "%s | step 2/6 | assembling training matrix from feature cache (%d subjects, labeled epochs)",
+        "%s | step 2/5 | assembling training matrix from feature cache (%d subjects, labeled epochs)",
         fold_label,
         len(train_records),
     )
@@ -198,88 +212,94 @@ def run_fold(
     if X_train.shape[0] == 0:
         raise RuntimeError("No labeled training epochs for this fold.")
     log.info(
-        "%s | step 2/6 | done | X.shape=%s | elapsed %.1fs",
+        "%s | step 2/5 | done | X.shape=%s | elapsed %.1fs",
         fold_label,
         X_train.shape,
         time.time() - t0,
     )
 
-    log.info("%s | step 3/6 | Kruskal–Wallis (keep p <= %g)", fold_label, kw_p)
-    t0 = time.time()
-    kw_mask = kruskal_wallis_mask(X_train, y_train, p_threshold=kw_p)
-    if not np.any(kw_mask):
-        log.warning("%s | KW kept no features; using all %d features", fold_label, len(all_names))
-        kw_mask[:] = True
-    n_kw = int(np.sum(kw_mask))
-    log.info(
-        "%s | step 3/6 | done | kept %d/%d features | %.1fs",
-        fold_label,
-        n_kw,
-        len(all_names),
-        time.time() - t0,
-    )
-
-    name_arr = np.array(all_names)
-    names_kw = name_arr[kw_mask].tolist()
-    X_kw = X_train[:, kw_mask]
-
-    k_sub = min(mrmr_k, X_kw.shape[1])
-    log.info("%s | step 4/6 | mRMR: select up to %d from %d (after KW)", fold_label, k_sub, X_kw.shape[1])
-    t0 = time.time()
-    try:
-        picked = mrmr_select_features(
-            X_kw, y_train, names_kw, k_sub, random_state=random_state
+    internal_cv_details: dict | None = None
+    if internal_cv_k >= 2:
+        mk_g = mrmr_k_grid if mrmr_k_grid else [mrmr_k]
+        ne_g = n_estimators_grid if n_estimators_grid else [n_estimators]
+        log.info(
+            "%s | step 3/5 | internal subject CV | folds=%d | mrmr_k grid %s | n_estimators grid %s",
+            fold_label,
+            internal_cv_k,
+            mk_g,
+            ne_g,
         )
-    except Exception as exc:
-        log.warning("%s | mRMR failed (%s); falling back to first %d names", fold_label, exc, k_sub)
-        picked = names_kw[:k_sub]
+        t0 = time.time()
+        chosen_m, chosen_ne, internal_cv_details = select_mrmr_n_estimators_subject_cv(
+            train_records,
+            feature_cache_dir,
+            feature_dim,
+            all_names,
+            mk_g,
+            ne_g,
+            kw_p,
+            n_splits=internal_cv_k,
+            random_state=random_state,
+            rf_n_jobs=rf_n_jobs,
+            show_progress=show_progress,
+            fold_label=fold_label,
+            quiet=quiet,
+        )
+        log.info(
+            "%s | step 3/5 | internal CV done | chosen mrmr_k=%d n_estimators=%d | best mean macro-F1=%.4f | %.1fs",
+            fold_label,
+            chosen_m,
+            chosen_ne,
+            float(internal_cv_details.get("best_mean_macro_f1", float("nan"))),
+            time.time() - t0,
+        )
+        mrmr_k, n_estimators = chosen_m, chosen_ne
+    else:
+        log.info(
+            "%s | step 3/5 | fixed hyperparams | mrmr_k=%d n_estimators=%d",
+            fold_label,
+            mrmr_k,
+            n_estimators,
+        )
 
-    if not picked:
-        picked = names_kw[: min(10, len(names_kw))]
     log.info(
-        "%s | step 4/6 | done | selected %d features | %.1fs | e.g. %s",
+        "%s | step 4/5 | RandomForest fit (KW → mRMR → RF) | mrmr_k=%d trees=%d n_jobs=%s | samples=%d",
+        fold_label,
+        mrmr_k,
+        n_estimators,
+        rf_n_jobs,
+        X_train.shape[0],
+    )
+    t0 = time.time()
+    rf, picked, cols = fit_memar_rf_pipeline(
+        X_train,
+        y_train,
+        all_names,
+        mrmr_k=mrmr_k,
+        n_estimators=n_estimators,
+        kw_p=kw_p,
+        random_state=random_state,
+        rf_n_jobs=rf_n_jobs,
+    )
+    log.info(
+        "%s | step 4/5 | done | selected %d features | e.g. %s | RF fit %.1fs",
         fold_label,
         len(picked),
-        time.time() - t0,
         ", ".join(picked[: min(5, len(picked))]),
+        time.time() - t0,
     )
-
-    name_to_idx = {n: i for i, n in enumerate(all_names)}
-    cols = [name_to_idx[n] for n in picked]
-    X_sel = X_train[:, cols]
-
-    max_f = max(1, int(np.floor(np.sqrt(X_sel.shape[1]))))
-    log.info(
-        "%s | step 5/6 | RandomForest fit | trees=%d max_features=%d n_jobs=%s | samples=%d",
-        fold_label,
-        n_estimators,
-        max_f,
-        rf_n_jobs,
-        X_sel.shape[0],
-    )
-    t0 = time.time()
-    rf = RandomForestClassifier(
-        n_estimators=n_estimators,
-        max_features=max_f,
-        random_state=random_state,
-        n_jobs=rf_n_jobs,
-        class_weight="balanced_subsample",
-    )
-    rf.fit(X_sel, y_train)
-    log.info("%s | step 5/6 | done | RF fit %.1fs", fold_label, time.time() - t0)
 
     X_test, hyp_true = load_cached_subject_matrix(feature_cache_dir, test_record)
     n_ep = int(X_test.shape[0])
     log.info(
-        "%s | step 6/6 | predict test subject | epochs=%d (vectorized from cache)",
+        "%s | step 5/5 | predict test subject | epochs=%d (vectorized from cache)",
         fold_label,
         n_ep,
     )
     t0 = time.time()
-    X_sel = X_test[:, cols]
-    hyp_pred = rf.predict(X_sel).astype(np.int64)
+    hyp_pred = predict_memar_rf(X_test, rf, cols)
     hyp_true = np.asarray(hyp_true, dtype=np.int64)
-    log.info("%s | step 6/6 | done | predicted %d epochs | %.1fs", fold_label, len(hyp_pred), time.time() - t0)
+    log.info("%s | step 5/5 | done | predicted %d epochs | %.1fs", fold_label, len(hyp_pred), time.time() - t0)
     mask = hyp_true >= 0
     if mask.sum():
         acc = float(accuracy_score(hyp_true[mask], hyp_pred[mask]))
@@ -315,6 +335,8 @@ def run_fold(
         "kw_p": kw_p,
         "eeg_channel": eeg_channel,
         "memar_et_al_config_path": memar_config_path,
+        "internal_cv_k": internal_cv_k,
+        "internal_cv_details": internal_cv_details,
     }
     save_sklearn_bundle_tar(os.path.join(run_dir, "best_model.gz"), bundle)
 
@@ -386,6 +408,8 @@ def run_fold(
                 "kruskal_wallis_p": kw_p,
                 "memar_subject_cv_viii_b": True,
                 "all_non_test_subjects_for_training": True,
+                "internal_cv_k": internal_cv_k,
+                "internal_cv_details": internal_cv_details,
             }
         },
         "net_parameters": {
@@ -463,7 +487,29 @@ def main() -> None:
         "--n-estimators",
         type=int,
         default=100,
-        help="RandomForest trees (paper Sec. VIII-B subject CV: 100).",
+        help="RandomForest trees (paper Sec. VIII-B subject CV: 100). Ignored for selection when --internal-cv-k is set.",
+    )
+    parser.add_argument(
+        "--internal-cv-k",
+        type=int,
+        default=0,
+        metavar="K",
+        help="Subject-wise K-fold on *training* subjects to grid-search mRMR-k and n_estimators (KW+mRMR+RF refit per inner fold). "
+        "0 = use fixed --mrmr-k and --n-estimators (default). K must be >= 2 when enabled and <= number of training subjects per LOSO fold.",
+    )
+    parser.add_argument(
+        "--mrmr-k-grid",
+        type=str,
+        default="50,100,150,200,250,300,350,400,450,500,550,600,650,700,750,800,850,900,950,1000",
+        metavar="LIST",
+        help="Comma-separated mRMR candidate sizes after KW (used with --internal-cv-k only).",
+    )
+    parser.add_argument(
+        "--n-estimators-grid",
+        type=str,
+        default="50,100,150,200,250,300,350,400,450,500",
+        metavar="LIST",
+        help="Comma-separated RandomForest n_estimators candidates (used with --internal-cv-k only).",
     )
     parser.add_argument("--kw-p", type=float, default=0.01, help="Kruskal–Wallis p threshold (keep if <=)")
     parser.add_argument("--memmap-only", action="store_true", help="Only build memmaps; no training.")
@@ -542,6 +588,16 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if args.internal_cv_k < 0:
+        raise SystemExit("--internal-cv-k must be >= 0")
+    if args.internal_cv_k == 1:
+        raise SystemExit("--internal-cv-k must be 0 (disabled) or >= 2")
+    try:
+        mrmr_k_grid_parsed = _parse_csv_positive_ints(args.mrmr_k_grid)
+        n_estimators_grid_parsed = _parse_csv_positive_ints(args.n_estimators_grid)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
     experiments_directory = os.path.join(os.path.dirname(__file__), "base_experiments")
     exp_name = "memar_et_al"
     dataset = "dodh"
@@ -600,6 +656,15 @@ def main() -> None:
     ]
     rd.seed(2019)
     rd.shuffle(available_dreem_records)
+    if args.internal_cv_k >= 2:
+        n_train_subj = len(available_dreem_records) - 1
+        if n_train_subj < args.internal_cv_k:
+            raise SystemExit(
+                "Each LOSO fold has {} training subjects; --internal-cv-k={} requires at least that many.".format(
+                    n_train_subj,
+                    args.internal_cv_k,
+                )
+            )
     folds = [[r] for r in available_dreem_records]
 
     if args.folds is None:
@@ -640,6 +705,10 @@ def main() -> None:
     all_eeg_channels = bool(args.all_eeg_channels)
     eeg_key = "__all_eeg__" if all_eeg_channels else eeg_channel
 
+    internal_cv_k = int(args.internal_cv_k)
+    mrmr_k_grid_kw: list[int] | None = mrmr_k_grid_parsed if internal_cv_k >= 2 else None
+    n_estimators_grid_kw: list[int] | None = n_estimators_grid_parsed if internal_cv_k >= 2 else None
+
     fold_jobs: list[dict] = []
     for i, fold in enumerate(folds):
         if i not in effective_fold_indices:
@@ -666,6 +735,9 @@ def main() -> None:
                 "quiet": args.quiet,
                 "all_eeg_channels": all_eeg_channels,
                 "feature_dim": expected_feature_dim(memmap_description, all_eeg_channels),
+                "internal_cv_k": internal_cv_k,
+                "mrmr_k_grid": mrmr_k_grid_kw,
+                "n_estimators_grid": n_estimators_grid_kw,
             }
         )
 
