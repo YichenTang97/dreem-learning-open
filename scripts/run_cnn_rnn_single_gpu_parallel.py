@@ -28,9 +28,10 @@ import threading
 from typing import List, Tuple
 
 from dreem_learning_open.settings import DODO_SETTINGS, DODH_SETTINGS, EXPERIMENTS_DIRECTORY
+from dreem_learning_open.utils.memmap_eeg import filter_memmap_signals_eeg_only, with_eeg_model_suffix
 
-ALGO = "cnn_rnn"
-CONFIG_ROOT = os.path.join("scripts", "base_experiments", ALGO)
+ALGO_BASE = "cnn_rnn"
+CONFIG_ROOT = os.path.join("scripts", "base_experiments", ALGO_BASE)
 
 DATASET_SETTINGS = {
     "dodh": DODH_SETTINGS,
@@ -42,7 +43,7 @@ def memmap_hash(memmap_description: dict) -> str:
     return hashlib.sha1(json.dumps(memmap_description).encode()).hexdigest()[:10]
 
 
-def load_memmap_description(dataset: str) -> dict:
+def load_memmap_description(dataset: str, *, eeg_only: bool) -> dict:
     path = os.path.join(CONFIG_ROOT, "memmaps.json")
     with open(path, "r") as f:
         memmaps = json.load(f)
@@ -50,6 +51,8 @@ def load_memmap_description(dataset: str) -> dict:
         if desc.get("dataset") == dataset:
             out = dict(desc)
             out.pop("dataset", None)
+            if eeg_only:
+                out = filter_memmap_signals_eeg_only(out)
             return out
     raise RuntimeError("No memmap block for dataset={!r} in {}".format(dataset, path))
 
@@ -77,10 +80,10 @@ def compute_fold_count(dataset_dir: str) -> int:
     return len(records)
 
 
-def runs_root_for(dataset: str, out_dir: str | None) -> str:
+def runs_root_for(dataset: str, out_dir: str | None, algo: str) -> str:
     if out_dir:
         return out_dir
-    return os.path.join(EXPERIMENTS_DIRECTORY, dataset, ALGO)
+    return os.path.join(EXPERIMENTS_DIRECTORY, dataset, algo)
 
 
 def load_completed_folds(runs_root: str) -> List[int]:
@@ -156,6 +159,7 @@ def run_workers(
     round_idx: int,
     logs_dir: str,
     out_dir: str | None,
+    eeg_only: bool,
 ) -> bool:
     batches = partition_evenly(pending, min(workers, len(pending)))
     procs: List[Tuple[subprocess.Popen, str, threading.Thread]] = []
@@ -171,6 +175,8 @@ def run_workers(
         ]
         if out_dir:
             cmd += ["--out_dir", out_dir]
+        if eeg_only:
+            cmd.append("--eeg-only")
 
         env = dict(os.environ)
         env["CUDA_VISIBLE_DEVICES"] = str(cuda_device)
@@ -238,6 +244,11 @@ def main() -> int:
         action="store_true",
         help="Pass --rebuild-memmaps to the bootstrap run_cnn_rnn.py run only",
     )
+    parser.add_argument(
+        "--eeg-only",
+        action="store_true",
+        help="Train EEG-only models; runs live under cnn_rnn_eeg/ (same memmap hash as full CNN-RNN for dodh/dodo).",
+    )
     args = parser.parse_args()
 
     if args.workers < 1:
@@ -246,10 +257,11 @@ def main() -> int:
     logs_dir = "logs_cnn_rnn_single_gpu_parallel"
     os.makedirs(logs_dir, exist_ok=True)
 
-    memmap_description = load_memmap_description(args.dataset)
+    algo = with_eeg_model_suffix(ALGO_BASE, args.eeg_only)
+    memmap_description = load_memmap_description(args.dataset, eeg_only=args.eeg_only)
     dataset_dir = get_dataset_dir(args.dataset, memmap_description)
     requested_folds = set(args.folds) if args.folds is not None else None
-    runs_root = runs_root_for(args.dataset, args.out_dir)
+    runs_root = runs_root_for(args.dataset, args.out_dir, algo)
 
     for round_idx in range(1, args.max_rounds + 1):
         print("\n========== Round {}/{} ==========".format(round_idx, args.max_rounds))
@@ -271,6 +283,8 @@ def main() -> int:
                 bootstrap_cmd += ["--out_dir", args.out_dir]
             if args.rebuild_memmaps:
                 bootstrap_cmd += ["--rebuild-memmaps"]
+            if args.eeg_only:
+                bootstrap_cmd.append("--eeg-only")
 
             env = dict(os.environ)
             env["CUDA_VISIBLE_DEVICES"] = str(args.cuda_device)
@@ -287,7 +301,7 @@ def main() -> int:
             "--dataset",
             args.dataset,
             "--algo",
-            ALGO,
+            algo,
             "--base-experiments-dir",
             os.path.join("scripts", "base_experiments"),
             "--metric",
@@ -332,6 +346,7 @@ def main() -> int:
             round_idx=round_idx,
             logs_dir=logs_dir,
             out_dir=args.out_dir,
+            eeg_only=args.eeg_only,
         )
         if not ok:
             print("Some workers failed. Re-indexing next round and retrying remaining folds.")

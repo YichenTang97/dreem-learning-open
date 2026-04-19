@@ -11,13 +11,28 @@ import os
 import random as rd
 from typing import Dict, Optional, Tuple
 
+from dreem_learning_open.utils.memmap_eeg import EEG_MODEL_SUFFIX, filter_memmap_signals_eeg_only
+
 
 def memmap_hash(memmap_description: dict) -> str:
     return hashlib.sha1(json.dumps(memmap_description).encode()).hexdigest()[:10]
 
 
 def load_memmap_description(base_experiments_dir: str, algo: str, dataset: str) -> dict:
-    memmaps_path = os.path.join(base_experiments_dir, algo, "memmaps.json")
+    """
+    Load memmap JSON for ``algo`` and ``dataset``.
+
+    If ``algo`` ends with ``_eeg`` (e.g. ``simple_sleep_net_eeg``), configs are read from
+    the base name (``simple_sleep_net``) and the description is filtered to EEG-only
+    signals so the memmap hash matches EEG-only training runs.
+    """
+    config_algo = algo
+    eeg_only = False
+    if algo.endswith(EEG_MODEL_SUFFIX) and len(algo) > len(EEG_MODEL_SUFFIX):
+        config_algo = algo[: -len(EEG_MODEL_SUFFIX)]
+        eeg_only = True
+
+    memmaps_path = os.path.join(base_experiments_dir, config_algo, "memmaps.json")
     with open(memmaps_path, "r") as f:
         memmaps_description = json.load(f)
 
@@ -25,6 +40,8 @@ def load_memmap_description(base_experiments_dir: str, algo: str, dataset: str) 
         if description.get("dataset") == dataset:
             description = dict(description)
             del description["dataset"]
+            if eeg_only:
+                description = filter_memmap_signals_eeg_only(description)
             return description
     raise RuntimeError(
         "No memmap block for dataset={!r} in {}".format(dataset, memmaps_path)

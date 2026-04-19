@@ -26,23 +26,23 @@ import threading
 from typing import List, Tuple
 
 from dreem_learning_open.settings import DODH_SETTINGS, EXPERIMENTS_DIRECTORY
-
-
-ALGO = "simple_sleep_net"
+from dreem_learning_open.utils.memmap_eeg import filter_memmap_signals_eeg_only, with_eeg_model_suffix
 
 
 def memmap_hash(memmap_description: dict) -> str:
     return hashlib.sha1(json.dumps(memmap_description).encode()).hexdigest()[:10]
 
 
-def load_memmap_description() -> dict:
-    path = os.path.join("scripts", "base_experiments", ALGO, "memmaps.json")
+def load_memmap_description(*, eeg_only: bool) -> dict:
+    path = os.path.join("scripts", "base_experiments", "simple_sleep_net", "memmaps.json")
     with open(path, "r") as f:
         memmaps = json.load(f)
     for desc in memmaps:
         if desc.get("dataset") == "dodh":
             out = dict(desc)
             out.pop("dataset", None)
+            if eeg_only:
+                out = filter_memmap_signals_eeg_only(out)
             return out
     raise RuntimeError("No dodh memmap_description found in {}".format(path))
 
@@ -67,8 +67,8 @@ def compute_fold_count(dataset_dir: str) -> int:
     return len(records)
 
 
-def load_completed_folds() -> List[int]:
-    runs_root = os.path.join(EXPERIMENTS_DIRECTORY, "dodh", ALGO)
+def load_completed_folds(algo: str) -> List[int]:
+    runs_root = os.path.join(EXPERIMENTS_DIRECTORY, "dodh", algo)
     jsonl = os.path.join(runs_root, "completed_folds.jsonl")
     if not os.path.isfile(jsonl):
         return []
@@ -140,6 +140,7 @@ def run_workers(
     pending: List[int],
     round_idx: int,
     logs_dir: str,
+    eeg_only: bool,
 ) -> bool:
     batches = partition_evenly(pending, min(workers, len(pending)))
     procs: List[Tuple[subprocess.Popen, str, threading.Thread]] = []
@@ -154,6 +155,8 @@ def run_workers(
             "--folds",
             *[str(x) for x in folds],
         ]
+        if eeg_only:
+            cmd.append("--eeg-only")
         env = dict(os.environ)
         env["CUDA_VISIBLE_DEVICES"] = str(cuda_device)
         log_path = os.path.join(logs_dir, "worker_{}_round_{}.log".format(worker_id, round_idx))
@@ -192,6 +195,11 @@ def main() -> int:
         metavar="N",
         help="Optional subset of fold indices to run (default: all folds). Example: --folds 0 1 2",
     )
+    parser.add_argument(
+        "--eeg-only",
+        action="store_true",
+        help="Train EEG-only models; runs live under simple_sleep_net_eeg/",
+    )
     args = parser.parse_args()
 
     if args.workers < 1:
@@ -200,7 +208,8 @@ def main() -> int:
     logs_dir = "logs_single_gpu_parallel"
     os.makedirs(logs_dir, exist_ok=True)
 
-    memmap_description = load_memmap_description()
+    algo = with_eeg_model_suffix("simple_sleep_net", args.eeg_only)
+    memmap_description = load_memmap_description(eeg_only=args.eeg_only)
     dataset_dir = get_dataset_dir(memmap_description)
     requested_folds = set(args.folds) if args.folds is not None else None
 
@@ -220,6 +229,8 @@ def main() -> int:
                 "--folds",
                 str(bootstrap_fold),
             ]
+            if args.eeg_only:
+                bootstrap_cmd.append("--eeg-only")
             env = dict(os.environ)
             env["CUDA_VISIBLE_DEVICES"] = str(args.cuda_device)
             bootstrap_log = os.path.join(logs_dir, "bootstrap_round_{}.log".format(round_idx))
@@ -233,6 +244,12 @@ def main() -> int:
         index_cmd = [
             args.python_exec,
             "scripts/experiment_utils/index_experiments.py",
+            "--dataset",
+            "dodh",
+            "--algo",
+            algo,
+            "--base-experiments-dir",
+            os.path.join("scripts", "base_experiments"),
             "--metric",
             args.metric,
         ]
@@ -250,7 +267,7 @@ def main() -> int:
                 raise ValueError(
                     "Requested folds out of range 0..{}: {}".format(total_folds - 1, invalid)
                 )
-        completed = load_completed_folds()
+        completed = load_completed_folds(algo)
         pending = [x for x in range(total_folds) if x not in set(completed)]
         if requested_folds is not None:
             pending = [x for x in pending if x in requested_folds]
@@ -271,6 +288,7 @@ def main() -> int:
             pending=pending,
             round_idx=round_idx,
             logs_dir=logs_dir,
+            eeg_only=args.eeg_only,
         )
         if not ok:
             print("Some workers failed. Re-indexing next round and retrying remaining folds.")

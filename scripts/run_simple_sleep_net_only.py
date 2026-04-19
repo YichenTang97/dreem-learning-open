@@ -5,7 +5,11 @@ Run from the repository root, with the package installed or on PYTHONPATH.
 
 Parallel folds (e.g. RunPod with several GPUs)
 -----------------------------------------------
-1. Build memmaps once (single process), without wiping existing outputs::
+1. Build memmaps once (single process), without training folds::
+
+     python scripts/run_simple_sleep_net_only.py --memmap-only
+
+   Or build memmaps and run fold 0 only, without wiping existing outputs::
 
      python scripts/run_simple_sleep_net_only.py --folds 0 --no-force
 
@@ -53,6 +57,16 @@ def main():
         help='When --no-force is used, reuse existing incomplete run UUIDs per fold instead '
              'of creating new UUID directories.',
     )
+    parser.add_argument(
+        '--eeg-only',
+        action='store_true',
+        help='Train on EEG channels only; save under EXPERIMENTS_DIRECTORY/<dataset>/simple_sleep_net_eeg/.',
+    )
+    parser.add_argument(
+        '--memmap-only',
+        action='store_true',
+        help='Only ensure H5→memmap pipeline exists for this config (creates if missing); no fold training.',
+    )
     args = parser.parse_args()
 
     datasets = {'dodh': DODH_SETTINGS}
@@ -68,6 +82,8 @@ def main():
         force=not args.no_force,
         skip_memmap_build=args.skip_memmap_build,
         reuse_incomplete_uuids=args.reuse_incomplete_uuids,
+        eeg_only=args.eeg_only,
+        memmap_only=args.memmap_only,
     )
 
 

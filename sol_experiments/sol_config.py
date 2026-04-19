@@ -218,6 +218,7 @@ TRAIN_DEFAULTS: dict = {
 FINETUNE_DEFAULTS: dict = {
     "dataset": "dodh",
     "base_model": "cnn_rnn",
+    "eeg_only": False,
     "cutoff_minutes": 10.0,
     "alpha": 0.5,
     "lr": 1e-4,

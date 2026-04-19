@@ -51,6 +51,8 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from dreem_learning_open.utils.memmap_eeg import with_eeg_model_suffix
+
 from sol_experiments.sol_config import (
     DATASET_SETTINGS,
     FINETUNE_DEFAULTS,
@@ -466,6 +468,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=argparse.SUPPRESS,
     )
+    p.add_argument(
+        "--eeg-only",
+        action="store_true",
+        help=(
+            "Use pretrained checkpoints under <base_model>_eeg/ (same as "
+            "scripts/run_*_only.py --eeg-only). Implies default base_exp_dir and "
+            "finetune output tag use the _eeg suffix."
+        ),
+    )
     return p
 
 
@@ -497,14 +508,17 @@ def _is_completed_finetune_result(result: Dict, args: argparse.Namespace) -> boo
 
 
 def run_finetune(args: argparse.Namespace) -> None:
-    resolved_base = args.base_exp_dir or default_exp_dir(args.dataset, args.base_model)
+    pretrained_name = with_eeg_model_suffix(args.base_model, args.eeg_only)
+    resolved_base = args.base_exp_dir or default_exp_dir(args.dataset, pretrained_name)
     resolved_sol  = args.sol_targets  or default_targets_path(args.dataset)
     resolved_out  = args.out_dir      or default_finetune_dir(
-        args.dataset, args.base_model, args.cutoff_minutes, args.alpha
+        args.dataset, pretrained_name, args.cutoff_minutes, args.alpha
     )
 
     print_config("finetune_sol.py", {
         "base_model":      args.base_model,
+        "pretrained_name": pretrained_name,
+        "eeg_only":        args.eeg_only,
         "dataset":         args.dataset,
         "base_exp_dir":    resolved_base,
         "sol_targets":     resolved_sol,
@@ -640,7 +654,10 @@ def run_finetune(args: argparse.Namespace) -> None:
         print(f"        --exp_dir {resolved_out}\n")
 
     summary = {
-        "base_model": args.base_model, "dataset": args.dataset,
+        "base_model": args.base_model,
+        "eeg_only": args.eeg_only,
+        "pretrained_folder": pretrained_name,
+        "dataset": args.dataset,
         "cutoff_minutes": args.cutoff_minutes, "alpha": args.alpha,
         "lr": args.lr, "epochs": args.epochs, "patience": args.patience,
         "workers": args.workers,
@@ -675,11 +692,12 @@ def main(args: argparse.Namespace) -> None:
         return
 
     # Multi-worker scheduler: partition folds and launch subprocess workers.
+    pretrained_name = with_eeg_model_suffix(args.base_model, args.eeg_only)
     if args.folds:
         all_target_folds = sorted(set(args.folds))
     else:
         # We need fold count to partition all folds deterministically.
-        resolved_base = args.base_exp_dir or default_exp_dir(args.dataset, args.base_model)
+        resolved_base = args.base_exp_dir or default_exp_dir(args.dataset, pretrained_name)
         fold_map = find_fold_dirs(resolved_base)
         all_target_folds = sorted(range(len(fold_map)))
 
@@ -720,6 +738,8 @@ def main(args: argparse.Namespace) -> None:
             cmd.extend(["--out_dir", args.out_dir])
         if args.force:
             cmd.append("--force")
+        if args.eeg_only:
+            cmd.append("--eeg-only")
 
         env = dict(os.environ)
         assigned_gpu: Optional[int] = None

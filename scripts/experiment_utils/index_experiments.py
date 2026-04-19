@@ -198,7 +198,7 @@ def main() -> None:
 
     runs_root = args.runs_root or os.path.join(EXPERIMENTS_DIRECTORY, args.dataset, args.algo)
     if not os.path.isdir(runs_root):
-        raise FileNotFoundError("Runs root does not exist: {!r}".format(runs_root))
+        os.makedirs(runs_root, exist_ok=True)
 
     run_ids = [
         name

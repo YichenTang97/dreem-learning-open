@@ -10,6 +10,7 @@ Resume semantics match ``dreem_learning_open.utils.run_experiments`` /
 
 * Memmaps: if ``groups_description.json`` already exists for this memmap hash,
   skip ``h5_to_memmaps`` unless ``--rebuild-memmaps``.
+* ``--memmap-only``: build or reuse memmaps for this dataset/config then exit (no training).
 * Folds: skip runs that already have a *complete* UUID directory (see
   ``_is_run_complete`` in ``run_experiments``).
 * Failed / interrupted folds: reuse the same UUID directory when resuming
@@ -47,6 +48,7 @@ from sol_experiments.sol_config import (
 from dreem_learning_open.logger.logger import log_experiment
 from dreem_learning_open.preprocessings.h5_to_memmap import h5_to_memmaps
 from dreem_learning_open.utils.train_test_val_split import train_test_val_split
+from dreem_learning_open.utils.memmap_eeg import filter_memmap_signals_eeg_only, with_eeg_model_suffix
 from dreem_learning_open.utils.run_experiments import (
     memmap_hash,
     _find_incomplete_run_ids_by_test_record,
@@ -54,7 +56,7 @@ from dreem_learning_open.utils.run_experiments import (
     _recover_test_record_id,
 )
 
-MODEL_NAME = "cnn_rnn"
+MODEL_NAME_BASE = "cnn_rnn"
 
 
 def _complete_test_record_ids(save_folder: str) -> set:
@@ -86,7 +88,7 @@ def _complete_test_record_ids(save_folder: str) -> set:
 # Config loading
 # ---------------------------------------------------------------------------
 
-def load_configs(dataset_name: str) -> tuple:
+def load_configs(dataset_name: str, *, eeg_only: bool = False) -> tuple:
     """Load all JSON config files for the CNN-RNN experiment."""
     all_memmaps = json.load(open(os.path.join(CNN_RNN_CONFIGS_DIR, "memmaps.json")))
     memmap_desc = next(
@@ -100,6 +102,8 @@ def load_configs(dataset_name: str) -> tuple:
             f"(available: {available})"
         )
     memmap_desc = {k: v for k, v in memmap_desc.items() if k != "dataset"}
+    if eeg_only:
+        memmap_desc = filter_memmap_signals_eeg_only(memmap_desc)
 
     normalization = json.load(open(os.path.join(CNN_RNN_CONFIGS_DIR, "normalization.json")))
     trainer_cfg   = json.load(open(os.path.join(CNN_RNN_CONFIGS_DIR, "trainer.json")))
@@ -259,33 +263,57 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Always create a new UUID per fold instead of reusing an incomplete run directory.",
     )
+    p.add_argument(
+        "--eeg-only",
+        action="store_true",
+        help="Train on EEG channels only; save under EXPERIMENTS_DIRECTORY/<dataset>/cnn_rnn_eeg/.",
+    )
+    p.add_argument(
+        "--memmap-only",
+        action="store_true",
+        help="Only ensure memmaps exist for this memmap hash (build if missing); no fold training.",
+    )
     return p
 
 
 def main(args: argparse.Namespace) -> None:
     dataset_settings = DATASET_SETTINGS[args.dataset]
-    out_dir = args.out_dir or default_exp_dir(args.dataset, MODEL_NAME)
+    model_name = with_eeg_model_suffix(MODEL_NAME_BASE, args.eeg_only)
+    out_dir = args.out_dir or default_exp_dir(args.dataset, model_name)
 
-    if args.force and os.path.isdir(out_dir):
+    if args.force and not args.memmap_only and os.path.isdir(out_dir):
         print(f"  --force: removing {out_dir}")
         shutil.rmtree(out_dir)
 
     print_config("run_cnn_rnn.py", {
         "dataset":    args.dataset,
+        "model_name": model_name,
         "out_dir":    out_dir,
         "folds":      args.folds or "all",
         "config_dir": CNN_RNN_CONFIGS_DIR,
+        "eeg_only":   args.eeg_only,
+        "memmap_only": args.memmap_only,
         "force":      args.force,
         "rebuild_memmaps": args.rebuild_memmaps,
         "reuse_incomplete_uuids": not args.no_reuse_incomplete_uuids and not args.force,
     })
 
     memmap_desc, normalization, trainer_cfg, net_cfg, dataset_cfg, transform = \
-        load_configs(args.dataset)
+        load_configs(args.dataset, eeg_only=args.eeg_only)
 
     all_records, folds = build_memmaps_and_folds(
         dataset_settings, memmap_desc, rebuild_memmaps=args.rebuild_memmaps
     )
+
+    if args.memmap_only:
+        memmaps_dir = os.path.join(
+            dataset_settings["memmap_directory"], memmap_hash(memmap_desc)
+        )
+        print(
+            f"\nMemmap-only: pipeline ready at {memmaps_dir!r} "
+            f"({len(all_records)} record(s)). Exiting without training.\n"
+        )
+        return
 
     complete_tests = _complete_test_record_ids(out_dir)
     incomplete_by_test = {}
