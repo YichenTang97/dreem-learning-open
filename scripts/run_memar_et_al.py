@@ -14,10 +14,11 @@ Parallel folds: use ``--workers N`` to run multiple LOSO folds in parallel proce
 same manual pattern as ``run_simple_sleep_net_only.py`` (one shell process per ``--folds``).
 Unless ``--quiet``, each fold still prints step logs and tqdm (stdout may interleave).
 
-Feature extraction: ``--feat-workers`` runs Memar features in parallel over training subjects
-(joblib) with ``tqdm.contrib.joblib`` when tqdm is available. Default uses all CPUs for a single
-fold; set ``--feat-workers 1`` to force sequential epochs (tqdm per epoch). Kraskov uses
-``scipy.spatial.cKDTree``; Butterworth SOS are precomputed once per run.
+Features are computed **once per subject** and stored under
+``<save_folder>/memar_features_cache/<key>/`` (compressed ``.npz``). Each LOSO fold loads from
+this cache for training and test. Use ``--refresh-feature-cache`` to force re-extraction.
+Parallel extraction uses ``--feat-workers`` (joblib). Kraskov uses ``scipy.spatial.cKDTree``;
+Butterworth SOS are precomputed once per run.
 """
 from __future__ import annotations
 
@@ -43,17 +44,14 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, cohen_kappa_score, f1_score
 
 from dreem_learning_open.memar_et_al.config import default_memar_et_al_config_path, get_eeg_signal
-from dreem_learning_open.memar_et_al.features import (
-    build_feature_names,
-    extract_memar_features_vector,
-    load_bands_config,
-    precompute_band_sos_list,
+from dreem_learning_open.memar_et_al.feature_cache import (
+    ensure_memar_feature_cache,
+    feature_cache_path,
+    compute_feature_cache_key,
+    load_cached_subject_matrix,
+    stack_labeled_training_from_cache,
 )
-from dreem_learning_open.memar_et_al.io import (
-    epoch_iterator,
-    gather_labeled_epochs,
-    load_hypnogram,
-)
+from dreem_learning_open.memar_et_al.features import build_feature_names, load_bands_config
 from dreem_learning_open.memar_et_al.selection import kruskal_wallis_mask, mrmr_select_features
 from dreem_learning_open.preprocessings.h5_to_memmap import h5_to_memmaps
 from dreem_learning_open.settings import DODH_SETTINGS, EXPERIMENTS_DIRECTORY
@@ -126,7 +124,7 @@ def run_fold(
     fold_idx: int | None = None,
     show_progress: bool = True,
     quiet: bool = False,
-    feat_n_jobs: int = 1,
+    feature_cache_dir: str = "",
 ) -> str:
     log = _memar_logger(quiet)
     fold_label = "fold {}".format(fold_idx) if fold_idx is not None else "fold"
@@ -134,6 +132,8 @@ def run_fold(
     test_basename_preview = os.path.basename(os.path.normpath(test_record))
 
     t_fold = time.time()
+    if not feature_cache_dir:
+        raise ValueError("feature_cache_dir is required (populate feature cache before run_fold).")
     log.info(
         "%s | start | test_subject=%s | train_subjects=%d | eeg=%s",
         fold_label,
@@ -150,34 +150,19 @@ def run_fold(
     )
 
     bands_cfg = load_bands_config()
-    fs = float(bands_cfg["fs"])
-    band_sos_list = precompute_band_sos_list(fs, bands_cfg)
     all_names = build_feature_names(bands_cfg)
 
-    _step2_suffix = ""
-    if show_progress and feat_n_jobs == 1:
-        _step2_suffix += " (tqdm per epoch)"
-    if feat_n_jobs > 1:
-        _step2_suffix += " (joblib {} workers".format(feat_n_jobs)
-        if show_progress:
-            _step2_suffix += ", tqdm over subjects"
-        _step2_suffix += ")"
     log.info(
-        "%s | step 2/6 | extracting %d features from labeled training epochs (%d subjects)%s",
+        "%s | step 2/6 | assembling training matrix from feature cache (%d subjects, labeled epochs)",
         fold_label,
-        len(all_names),
         len(train_records),
-        _step2_suffix,
     )
     t0 = time.time()
-    X_train, y_train = gather_labeled_epochs(
+    X_train, y_train = stack_labeled_training_from_cache(
         train_records,
-        memmap_description,
-        channel_signal=eeg_channel,
-        config_path=memar_config_path,
+        feature_cache_dir,
         show_progress=show_progress,
         progress_desc="{} train feats".format(fold_label),
-        feat_n_jobs=feat_n_jobs,
     )
     if X_train.shape[0] == 0:
         raise RuntimeError("No labeled training epochs for this fold.")
@@ -252,42 +237,18 @@ def run_fold(
     rf.fit(X_sel, y_train)
     log.info("%s | step 5/6 | done | RF fit %.1fs", fold_label, time.time() - t0)
 
-    n_ep = int(load_hypnogram(test_record).shape[0])
+    X_test, hyp_true = load_cached_subject_matrix(feature_cache_dir, test_record)
+    n_ep = int(X_test.shape[0])
     log.info(
-        "%s | step 6/6 | predict test subject | epochs=%d%s",
+        "%s | step 6/6 | predict test subject | epochs=%d (vectorized from cache)",
         fold_label,
         n_ep,
-        " (tqdm)" if show_progress else "",
     )
     t0 = time.time()
-    hyp_true = []
-    hyp_pred = []
-    pred_iter = epoch_iterator(
-        test_record, memmap_description, channel_signal=eeg_channel, config_path=memar_config_path
-    )
-    if show_progress:
-        try:
-            from tqdm import tqdm
-
-            pred_iter = tqdm(
-                pred_iter,
-                total=n_ep,
-                desc="{} predict".format(fold_label),
-                unit="ep",
-                leave=True,
-            )
-        except ImportError:
-            pass
-    for _i, ep, lab in pred_iter:
-        v = extract_memar_features_vector(ep, fs, bands_cfg, band_sos_list=band_sos_list)
-        v = v[cols]
-        pr = int(rf.predict(v.reshape(1, -1))[0])
-        hyp_pred.append(pr)
-        hyp_true.append(lab)
+    X_sel = X_test[:, cols]
+    hyp_pred = rf.predict(X_sel).astype(np.int64)
+    hyp_true = np.asarray(hyp_true, dtype=np.int64)
     log.info("%s | step 6/6 | done | predicted %d epochs | %.1fs", fold_label, len(hyp_pred), time.time() - t0)
-
-    hyp_pred = np.array(hyp_pred, dtype=np.int64)
-    hyp_true = np.array(hyp_true, dtype=np.int64)
     mask = hyp_true >= 0
     if mask.sum():
         acc = float(accuracy_score(hyp_true[mask], hyp_pred[mask]))
@@ -501,6 +462,11 @@ def main() -> None:
         action="store_true",
         help="Only warnings/errors to the console (disables per-step INFO and tqdm bars).",
     )
+    parser.add_argument(
+        "--refresh-feature-cache",
+        action="store_true",
+        help="Delete cached Memar .npz features for this memmap/EEG/bands key and re-extract all subjects.",
+    )
     args = parser.parse_args()
 
     experiments_directory = os.path.join(os.path.dirname(__file__), "base_experiments")
@@ -604,9 +570,30 @@ def main() -> None:
                 "rf_n_jobs": rf_n_jobs,
                 "show_progress": not args.quiet,
                 "quiet": args.quiet,
-                "feat_n_jobs": feat_n_jobs,
             }
         )
+
+    bands_cfg = load_bands_config()
+    feature_cache_key = compute_feature_cache_key(memmap_description, eeg_channel, bands_cfg)
+    fcache_dir = feature_cache_path(save_folder, feature_cache_key)
+    if fold_jobs:
+        _memar_logger(args.quiet)
+        if args.refresh_feature_cache and os.path.isdir(fcache_dir):
+            shutil.rmtree(fcache_dir)
+        ensure_memar_feature_cache(
+            fcache_dir,
+            feature_cache_key,
+            description_hash,
+            available_dreem_records,
+            memmap_description,
+            eeg_channel,
+            memar_config_path,
+            feat_n_jobs,
+            show_progress=not args.quiet,
+            quiet=args.quiet,
+        )
+        for job in fold_jobs:
+            job["feature_cache_dir"] = fcache_dir
 
     if args.workers == 1:
         for job in fold_jobs:
