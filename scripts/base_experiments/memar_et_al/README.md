@@ -37,7 +37,7 @@ Outputs are written under ``experiments/dodh/memar_et_al/``. Use ``--eeg-only`` 
 
 By default, re-running the script **keeps** ``memar_features_cache/`` (so you can resume after interrupting mRMR/RF); use ``--refresh-feature-cache`` to rebuild features, or ``--no-force`` to keep prior fold UUID folders too.
 
-Parallel folds (``--workers N``) use one process per fold. Use ``--skip-memmap-build`` so workers do not all run ``h5_to_memmaps``; use ``--no-force`` so they do not delete each other’s outputs. RandomForest defaults to ``n_jobs=-1`` (all cores per fold); set ``--rf-n-jobs`` to limit CPU when using many parallel folds. ``--clear-feature-cache-after`` removes the extracted-feature cache when the run finishes.
+Parallel folds (``--workers N``) use one process per fold. With ``--all-eeg-channels``, each process holds a huge feature matrix—use ``--workers 1`` or modest ``N`` if you see ``BrokenProcessPool`` (often out-of-memory). Use ``--skip-memmap-build`` so workers do not all run ``h5_to_memmaps``; use ``--no-force`` so they do not delete each other’s outputs. RandomForest defaults to ``n_jobs=-1`` (all cores per fold); set ``--rf-n-jobs`` to limit CPU when using many parallel folds. ``--clear-feature-cache-after`` removes the extracted-feature cache when the run finishes.
 
 Training logs six steps per fold (memmap index → feature extraction → KW → mRMR → RF fit → predict) with timings; ``tqdm`` bars run when ``--workers 1`` and not ``--quiet``. Use ``--quiet`` for warnings only.
 

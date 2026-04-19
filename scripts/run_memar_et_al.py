@@ -10,9 +10,10 @@ Run from repository root with the package on PYTHONPATH or installed::
     python scripts/run_memar_et_al.py --memmap-only
     python scripts/run_memar_et_al.py --folds 0 --no-force --skip-memmap-build
 
-Parallel folds: use ``--workers N`` to run multiple LOSO folds in parallel processes, or the
-same manual pattern as ``run_simple_sleep_net_only.py`` (one shell process per ``--folds``).
-Unless ``--quiet``, each fold still prints step logs and tqdm (stdout may interleave).
+Parallel folds: use ``--workers N`` to run multiple LOSO folds in parallel processes. With
+``--all-eeg-channels``, each process holds a very large matrix (KW/mRMR/RF); many workers can
+exhaust RAM and the OS may kill workers (``BrokenProcessPool``). Prefer ``--workers 1`` or
+few parallel folds unless you have plenty of memory.
 
 Features are computed **once per subject** and stored under
 ``<save_folder>/memar_features_cache/<key>/`` (compressed ``.npz``). Each LOSO fold loads from
@@ -28,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+from concurrent.futures import BrokenProcessPool
 import copy
 import hashlib
 import json
@@ -480,9 +482,9 @@ def main() -> None:
         type=int,
         default=1,
         metavar="N",
-        help="Number of parallel processes for LOSO folds (default: 1 sequential). "
-        "Use with --no-force when reusing an existing experiment directory. "
-        "Combine with --skip-memmap-build so workers do not rewrite memmaps.",
+        help="Number of parallel processes for LOSO folds (default: 1). High values with "
+        "--all-eeg-channels can OOM: each worker loads the full training feature matrix. "
+        "Use --no-force when reusing outputs; combine with --skip-memmap-build so workers do not rewrite memmaps.",
     )
     parser.add_argument(
         "--rf-n-jobs",
@@ -714,6 +716,11 @@ def main() -> None:
             print(
                 "Each fold logs and shows tqdm in its own process; lines may interleave on the console."
             )
+        if not args.quiet and args.workers > 1 and all_eeg_channels:
+            print(
+                "Warning: --all-eeg-channels with --workers > 1 uses ~one full training matrix per process; "
+                "OOM may kill workers (BrokenProcessPool). Use --workers 1 if this happens."
+            )
         with concurrent.futures.ProcessPoolExecutor(max_workers=args.workers) as executor:
             futs = []
             for job in fold_jobs:
@@ -731,7 +738,16 @@ def main() -> None:
                 )
                 futs.append((fi, executor.submit(_run_fold_unpack, j)))
             for fi, fut in futs:
-                run_dir = fut.result()
+                try:
+                    run_dir = fut.result()
+                except BrokenProcessPool as exc:
+                    raise SystemExit(
+                        "A parallel fold worker exited abruptly (often the Linux OOM killer when RAM is exhausted). "
+                        "With --all-eeg-channels, each fold loads a very large training matrix for Kruskal–Wallis / mRMR / RF; "
+                        "running many --workers duplicates that memory footprint.\n"
+                        "Try: --workers 1 (sequential folds), or reduce --workers, add RAM/swap, or --rf-n-jobs 1 to lower RF memory.\n"
+                        "Underlying error: {!r}".format(exc)
+                    ) from exc
                 print("Fold {} finished: {}".format(fi, run_dir))
 
     if fold_jobs and args.clear_feature_cache_after and os.path.isdir(fcache_dir):
