@@ -18,11 +18,11 @@ from dreem_learning_open.memar_et_al.features import (
     FEATURE_DIM,
     extract_memar_features_multichannel,
     load_bands_config,
+    memar_multichannel_eeg_paths,
     precompute_band_sos_list,
     total_memar_feature_dim,
 )
 from dreem_learning_open.memar_et_al.io import (
-    eeg_signal_order_from_memmap_desc,
     epoch_iterator,
     load_hypnogram,
 )
@@ -44,9 +44,9 @@ def compute_feature_cache_key(
     h.update(json.dumps(bands_config, sort_keys=True).encode("utf-8"))
     h.update(str(all_eeg_channels).encode("ascii"))
     if all_eeg_channels:
-        order = eeg_signal_order_from_memmap_desc(memmap_description)
-        h.update(json.dumps(order, sort_keys=True).encode("utf-8"))
-        h.update(str(total_memar_feature_dim(len(order))).encode("ascii"))
+        paths = memar_multichannel_eeg_paths(memmap_description)
+        h.update(json.dumps(paths, sort_keys=True).encode("utf-8"))
+        h.update(str(total_memar_feature_dim(len(paths))).encode("ascii"))
     else:
         h.update(str(FEATURE_DIM).encode("ascii"))
     return h.hexdigest()[:24]
@@ -64,8 +64,7 @@ def _subject_npz_path(cache_dir: str, record_path: str) -> str:
 def expected_feature_dim(memmap_description: dict, all_eeg_channels: bool) -> int:
     if not all_eeg_channels:
         return FEATURE_DIM
-    order = eeg_signal_order_from_memmap_desc(memmap_description)
-    return total_memar_feature_dim(len(order))
+    return total_memar_feature_dim(len(memar_multichannel_eeg_paths(memmap_description)))
 
 
 def _npz_valid(npz_path: str, record_path: str, expected_dim: int) -> bool:
@@ -197,7 +196,7 @@ def _write_manifest(
         "n_subjects": n_records,
     }
     if all_eeg_channels:
-        payload["eeg_signal_paths"] = eeg_signal_order_from_memmap_desc(memmap_description)
+        payload["eeg_signal_paths"] = memar_multichannel_eeg_paths(memmap_description)
     with open(os.path.join(cache_dir, MANIFEST_NAME), "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
 

@@ -68,8 +68,8 @@ from dreem_learning_open.memar_et_al.features import (
     build_feature_names,
     build_feature_names_multichannel,
     load_bands_config,
+    memar_multichannel_eeg_paths,
 )
-from dreem_learning_open.memar_et_al.io import eeg_signal_order_from_memmap_desc
 from dreem_learning_open.memar_et_al.selection import kruskal_wallis_mask, mrmr_select_features
 from dreem_learning_open.preprocessings.h5_to_memmap import h5_to_memmaps
 from dreem_learning_open.settings import DODH_SETTINGS, EXPERIMENTS_DIRECTORY
@@ -159,7 +159,7 @@ def run_fold(
         fold_label,
         test_basename_preview,
         len(train_records),
-        ("all {} channels".format(len(eeg_signal_order_from_memmap_desc(memmap_description))))
+        ("all {} EEG channels".format(len(memar_multichannel_eeg_paths(memmap_description))))
         if all_eeg_channels
         else eeg_channel,
         feature_dim,
@@ -175,7 +175,7 @@ def run_fold(
     bands_cfg = load_bands_config()
     if all_eeg_channels:
         all_names = build_feature_names_multichannel(
-            bands_cfg, eeg_signal_order_from_memmap_desc(memmap_description)
+            bands_cfg, memar_multichannel_eeg_paths(memmap_description)
         )
     else:
         all_names = build_feature_names(bands_cfg)

@@ -14,6 +14,7 @@ from dreem_learning_open.memar_et_al.features import (
     eeg_signal_order_from_memmap_desc,
     extract_memar_features_multichannel,
     load_bands_config,
+    memar_multichannel_eeg_paths,
     precompute_band_sos_list,
     total_memar_feature_dim,
 )
@@ -36,13 +37,14 @@ def epoch_iterator(
     Yields (epoch_index, epoch_eeg, stage_label) for each epoch in the record.
 
     If ``all_eeg_channels`` is False: ``epoch_eeg`` is 1-D for the selected channel.
-    If True: ``epoch_eeg`` is 2-D ``(wl, n_eeg)`` in memmap EEG column order.
+    If True: ``epoch_eeg`` is 2-D ``(wl, n_eeg)`` — one column per ``signals/eeg/...`` path
+    (EMG/ECG/EOG columns in ``eeg.mm`` are omitted).
 
     Channel selection (single-channel mode): ``channel_signal`` overrides config;
     if both are omitted, :func:`get_eeg_signal` is used.
     """
     order = eeg_signal_order_from_memmap_desc(memmap_description)
-    n_eeg = len(order)
+    n_cols_group = len(order)
     prop_path = os.path.join(record_path, "properties.json")
     with open(prop_path, "r", encoding="utf-8") as f:
         props = json.load(f)
@@ -56,9 +58,9 @@ def epoch_iterator(
         raise ValueError(
             "eeg length {} != n_epochs*wl {} for {}".format(shape[0], n_epochs * wl, record_path)
         )
-    if shape[1] < n_eeg:
+    if shape[1] < n_cols_group:
         raise ValueError(
-            "eeg.mm columns {} < {} EEG signals in memmap description".format(shape[1], n_eeg)
+            "eeg.mm columns {} < {} signals in memmap eeg group".format(shape[1], n_cols_group)
         )
     mm = np.memmap(
         os.path.join(record_path, "signals", "eeg.mm"),
@@ -67,8 +69,14 @@ def epoch_iterator(
         shape=shape,
     )
     if all_eeg_channels:
+        paths_eeg = memar_multichannel_eeg_paths(memmap_description)
+        col_idx = np.array(
+            [channel_index_for_signal(order, p) for p in paths_eeg],
+            dtype=np.intp,
+        )
         for i in range(n_epochs):
-            seg = np.asarray(mm[i * wl : (i + 1) * wl, :n_eeg], dtype=np.float64)
+            slab = np.asarray(mm[i * wl : (i + 1) * wl, :], dtype=np.float64)
+            seg = slab[:, col_idx]
             yield i, seg, int(hyp[i])
     else:
         sig = channel_signal if channel_signal is not None else get_eeg_signal(config_path)
@@ -102,8 +110,11 @@ def _gather_labeled_epochs_one_record(
             continue
         xs.append(extract_memar_features_multichannel(ep, fs, bands, band_sos_list=band_sos_list))
         ys.append(lab)
-    order = eeg_signal_order_from_memmap_desc(memmap_description)
-    fdim = total_memar_feature_dim(len(order)) if all_eeg_channels else FEATURE_DIM
+    fdim = (
+        total_memar_feature_dim(len(memar_multichannel_eeg_paths(memmap_description)))
+        if all_eeg_channels
+        else FEATURE_DIM
+    )
     if not xs:
         return np.zeros((0, fdim), dtype=np.float64), np.zeros((0,), dtype=np.int64)
     return np.vstack(xs), np.asarray(ys, dtype=np.int64)
@@ -123,8 +134,11 @@ def gather_labeled_epochs(
     bands = load_bands_config()
     fs = float(bands["fs"])
     band_sos_list = precompute_band_sos_list(fs, bands)
-    order = eeg_signal_order_from_memmap_desc(memmap_description)
-    fdim = total_memar_feature_dim(len(order)) if all_eeg_channels else FEATURE_DIM
+    fdim = (
+        total_memar_feature_dim(len(memar_multichannel_eeg_paths(memmap_description)))
+        if all_eeg_channels
+        else FEATURE_DIM
+    )
 
     if feat_n_jobs != int(feat_n_jobs) or feat_n_jobs < 1:
         raise ValueError("feat_n_jobs must be a positive integer")

@@ -17,6 +17,7 @@ from scipy.special import digamma, gamma
 
 from dreem_learning_open.memar_et_al.config import get_eeg_signal
 from dreem_learning_open.settings import REPO_ROOT
+from dreem_learning_open.utils.memmap_eeg import is_eeg_signal_path
 
 # Memar et al.: 13 features × 8 bands = 104. Hjorth Activity σ_x² equals SD², so we keep SD + HM + HC.
 FEATURE_DIM = 104
@@ -497,6 +498,19 @@ def eeg_signal_order_from_memmap_desc(memmap_description: dict) -> List[str]:
         if grp.get("name") == "eeg":
             return list(grp["signals"])
     raise ValueError("No eeg group in memmap_description")
+
+
+def memar_multichannel_eeg_paths(memmap_description: dict) -> List[str]:
+    """
+    Paths used for ``--all-eeg-channels``: only ``signals/eeg/...`` entries.
+
+    The memmap ``eeg`` group often lists EMG/ECG/EOG paths that are stacked into ``eeg.mm``;
+    those columns must not receive Memar EEG features.
+    """
+    paths = [p for p in eeg_signal_order_from_memmap_desc(memmap_description) if is_eeg_signal_path(p)]
+    if not paths:
+        raise ValueError("No signals/eeg/* paths in memmap eeg group (multichannel Memar mode)")
+    return paths
 
 
 # Default single-channel path; override via scripts/base_experiments/memar_et_al/memar_et_al_config.json

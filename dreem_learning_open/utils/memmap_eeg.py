@@ -18,6 +18,11 @@ def _is_eeg_signal_path(path: str) -> bool:
     return "/eeg/" in p or p.startswith("signals/eeg")
 
 
+def is_eeg_signal_path(path: str) -> bool:
+    """True if ``path`` is under ``signals/eeg/`` (excludes EMG, ECG, EOG, … in the eeg memmap group)."""
+    return _is_eeg_signal_path(path)
+
+
 def _filter_signal_entries(entries: List[Any]) -> List[Any]:
     """Recursively filter a memmap ``signals`` list to EEG-only paths."""
     out: List[Any] = []
