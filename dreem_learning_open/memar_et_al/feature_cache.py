@@ -173,19 +173,6 @@ def _extract_all_epochs_one_record(
     return X, y
 
 
-def _epoch_inner_effective(
-    feat_n_jobs_outer: int,
-    n_missing_subjects: int,
-    epoch_inner_requested: int,
-) -> int:
-    """Avoid nested joblib process pools: many subjects in parallel → no inner pool."""
-    if epoch_inner_requested <= 1:
-        return 1
-    if feat_n_jobs_outer > 1 and n_missing_subjects > 1:
-        return 1
-    return epoch_inner_requested
-
-
 def _write_manifest(
     cache_dir: str,
     cache_key: str,
@@ -268,7 +255,7 @@ def ensure_memar_feature_cache(
         return
 
     n_missing = len(missing)
-    inner_eff = _epoch_inner_effective(feat_n_jobs, n_missing, epoch_inner_n_jobs)
+    inner_eff = max(1, int(epoch_inner_n_jobs))
     effective_parallel = min(max(1, int(feat_n_jobs)), n_missing)
     if not quiet:
         log.info(
@@ -283,15 +270,9 @@ def ensure_memar_feature_cache(
                 feat_n_jobs,
                 effective_parallel,
             )
-        if epoch_inner_n_jobs > 1 and inner_eff == 1 and n_missing > 1:
+        if inner_eff > 1:
             log.info(
-                "Feature cache | --epoch-workers=%d disabled while extracting multiple subjects in parallel "
-                "(avoid nested joblib pools); use a single missing subject or --feat-workers 1 to enable.",
-                epoch_inner_n_jobs,
-            )
-        elif inner_eff > 1:
-            log.info(
-                "Feature cache | --epoch-workers=%d → per-subject epoch chunks (nested only when one subject extracts)",
+                "Feature cache | --epoch-workers=%d → nested per-subject epoch chunks (joblib)",
                 inner_eff,
             )
 

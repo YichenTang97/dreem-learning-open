@@ -20,8 +20,7 @@ this cache for training and test. Use ``--refresh-feature-cache`` to force re-ex
 
 Use ``--all-eeg-channels`` for 104 features per EEG channel (concatenated); outputs go under
 ``experiments/<dataset>/memar_et_al_eeg/`` (same convention as ``--eeg-only``). Parallelism:
-``--feat-workers`` (subjects in parallel), ``--epoch-workers`` (epoch chunks within a subject;
-disabled when multiple subjects extract in parallel to avoid nested joblib pools), and
+``--feat-workers`` (subjects in parallel), ``--epoch-workers`` (nested epoch chunks per subject), and
 ``--max-parallel`` to auto-tune both from CPU count. Kraskov uses ``scipy.spatial.cKDTree``;
 Butterworth SOS are precomputed once per run.
 """
@@ -471,7 +470,7 @@ def main() -> None:
         type=int,
         default=None,
         metavar="N",
-        help="RandomForest n_jobs per fold. Default: -1 if --workers 1, else 1 (avoid CPU oversubscription).",
+        help="RandomForest n_jobs per fold (default: -1, use all cores; can oversubscribe with --workers > 1).",
     )
     parser.add_argument(
         "--feat-workers",
@@ -502,14 +501,18 @@ def main() -> None:
         type=int,
         default=None,
         metavar="N",
-        help="Parallel joblib workers *within* each subject during cache extraction (epoch chunks). "
-        "Disabled automatically when multiple subjects extract in parallel (--feat-workers > 1). Default: 1.",
+        help="Parallel joblib workers within each subject during cache extraction (epoch chunks; nests with --feat-workers). Default: 1.",
     )
     parser.add_argument(
         "--max-parallel",
         action="store_true",
         help="Set --feat-workers and --epoch-workers from CPU count (~sqrt(N) subjects, ~N/sqrt epoch chunks). "
         "Overrides --feat-workers and --epoch-workers when set.",
+    )
+    parser.add_argument(
+        "--clear-feature-cache-after",
+        action="store_true",
+        help="After all LOSO folds finish, delete this run's memar_features_cache directory (default: keep cache).",
     )
     args = parser.parse_args()
 
@@ -583,7 +586,7 @@ def main() -> None:
     if args.workers < 1:
         raise SystemExit("--workers must be >= 1")
     if args.rf_n_jobs is None:
-        rf_n_jobs = 1 if args.workers > 1 else -1
+        rf_n_jobs = -1
     else:
         rf_n_jobs = args.rf_n_jobs
 
@@ -711,6 +714,11 @@ def main() -> None:
             for fi, fut in futs:
                 run_dir = fut.result()
                 print("Fold {} finished: {}".format(fi, run_dir))
+
+    if fold_jobs and args.clear_feature_cache_after and os.path.isdir(fcache_dir):
+        shutil.rmtree(fcache_dir)
+        if not args.quiet:
+            print("Removed feature cache at {!r} (--clear-feature-cache-after)".format(fcache_dir))
 
 
 if __name__ == "__main__":
