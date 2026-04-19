@@ -500,14 +500,14 @@ def main() -> None:
     parser.add_argument(
         "--mrmr-k-grid",
         type=str,
-        default="50,100,150,200,250,300,350,400,450,500,550,600,650,700,750,800,850,900,950,1000",
+        default="100,200,300,400,500,600,700,800,900,1000",
         metavar="LIST",
         help="Comma-separated mRMR candidate sizes after KW (used with --internal-cv-k only).",
     )
     parser.add_argument(
         "--n-estimators-grid",
         type=str,
-        default="50,100,150,200,250,300,350,400,450,500",
+        default="100,200,300,400,500",
         metavar="LIST",
         help="Comma-separated RandomForest n_estimators candidates (used with --internal-cv-k only).",
     )
