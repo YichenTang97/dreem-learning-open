@@ -9,19 +9,20 @@ from sklearn.ensemble import RandomForestClassifier
 from dreem_learning_open.memar_et_al.selection import kruskal_wallis_mask, mrmr_select_features
 
 
-def kw_mrmr_select_columns(
+def kw_mrmr_rank_columns(
     X_train: np.ndarray,
     y_train: np.ndarray,
     all_names: Sequence[str],
-    mrmr_k: int,
     kw_p: float,
     random_state: int,
 ) -> Tuple[List[str], List[int]]:
     """
-    Kruskal–Wallis screen and mRMR only; returns selected feature names and column indices into ``X``.
+    Kruskal–Wallis screen and full mRMR ranking only; returns ranked names and
+    ranked column indices into ``X``.
 
-    ``n_estimators`` does not affect this step, so internal CV can call it once per
-    ``(mrmr_k, inner_fold)`` and then vary only the RandomForest fit.
+    mRMR is sequential; prefixes of this ranking correspond to smaller ``k``.
+    This lets internal CV compute KW+mRMR once per inner fold and reuse ranking
+    prefixes for all ``mrmr_k`` candidates.
     """
     X_train = np.asarray(X_train, dtype=np.float64)
     y_train = np.asarray(y_train, dtype=np.int64)
@@ -35,7 +36,8 @@ def kw_mrmr_select_columns(
     names_kw = name_arr[kw_mask].tolist()
     X_kw = X_train[:, kw_mask]
 
-    k_sub = min(int(mrmr_k), X_kw.shape[1])
+    # Full ranking once (K = all KW-kept features), then use prefixes for specific k.
+    k_sub = int(X_kw.shape[1])
     try:
         picked = mrmr_select_features(
             X_kw, y_train, names_kw, k_sub, random_state=random_state
@@ -49,6 +51,24 @@ def kw_mrmr_select_columns(
     name_to_idx = {n: i for i, n in enumerate(all_names)}
     cols = [name_to_idx[n] for n in picked]
     return picked, cols
+
+
+def kw_mrmr_select_columns(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    all_names: Sequence[str],
+    mrmr_k: int,
+    kw_p: float,
+    random_state: int,
+) -> Tuple[List[str], List[int]]:
+    """KW + mRMR subset selection for a target ``mrmr_k`` (prefix of full ranking)."""
+    ranked_names, ranked_cols = kw_mrmr_rank_columns(
+        X_train, y_train, all_names, kw_p, random_state
+    )
+    k_sub = min(int(mrmr_k), len(ranked_cols))
+    if k_sub < 1:
+        k_sub = min(10, len(ranked_cols))
+    return ranked_names[:k_sub], ranked_cols[:k_sub]
 
 
 def fit_rf_on_selected_columns(

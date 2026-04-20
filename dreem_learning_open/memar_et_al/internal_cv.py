@@ -5,12 +5,12 @@ Outer evaluation remains LOSO on held-out test subjects. On the remaining traini
 we split by **subject** (not by epoch) into k folds; each inner fold retrains KW + mRMR + RF on
 inner-train subjects only and scores on inner-validation subjects to avoid leakage.
 
-**Efficiency:** ``n_estimators`` does not affect mRMR. For each ``(mrmr_k, inner_fold)`` we run
-KW + mRMR once, then fit one RandomForest per ``n_estimators`` candidate on the same columns.
+**Efficiency:** for each inner fold we run KW + full mRMR ranking once (K = all KW-kept
+features), then reuse ranking prefixes for all ``mrmr_k`` values and fit one RF per
+``n_estimators`` candidate.
 """
 from __future__ import annotations
 
-import itertools
 import logging
 from typing import Any, Dict, List, Sequence, Tuple
 
@@ -21,7 +21,7 @@ from sklearn.model_selection import KFold
 from dreem_learning_open.memar_et_al.feature_cache import stack_labeled_training_from_cache
 from dreem_learning_open.memar_et_al.pipeline import (
     fit_rf_on_selected_columns,
-    kw_mrmr_select_columns,
+    kw_mrmr_rank_columns,
     predict_memar_rf,
 )
 
@@ -74,46 +74,60 @@ def select_mrmr_n_estimators_subject_cv(
     subject_idx = np.arange(n_subj)
     fold_splits = list(kf.split(subject_idx))
 
-    grid = list(itertools.product(mk_grid, ne_grid))
-    grid_scores: Dict[Tuple[int, int], List[float]] = {(mk, ne): [] for mk, ne in grid}
+    grid_scores: Dict[Tuple[int, int], List[float]] = {
+        (mk, ne): [] for mk in mk_grid for ne in ne_grid
+    }
 
-    for mk in mk_grid:
-        for inner_train_i, inner_val_i in fold_splits:
-            tr_paths = [train_records[j] for j in inner_train_i]
-            va_paths = [train_records[j] for j in inner_val_i]
-            X_tr, y_tr = stack_labeled_training_from_cache(
-                tr_paths,
-                feature_cache_dir,
-                show_progress=False,
-                progress_desc="{} inner train".format(fold_label),
-                feature_dim=feature_dim,
-            )
-            X_va, y_va = stack_labeled_training_from_cache(
-                va_paths,
-                feature_cache_dir,
-                show_progress=False,
-                progress_desc="{} inner val".format(fold_label),
-                feature_dim=feature_dim,
-            )
-            if X_tr.shape[0] == 0 or X_va.shape[0] == 0:
+    for inner_train_i, inner_val_i in fold_splits:
+        tr_paths = [train_records[j] for j in inner_train_i]
+        va_paths = [train_records[j] for j in inner_val_i]
+        X_tr, y_tr = stack_labeled_training_from_cache(
+            tr_paths,
+            feature_cache_dir,
+            show_progress=False,
+            progress_desc="{} inner train".format(fold_label),
+            feature_dim=feature_dim,
+        )
+        X_va, y_va = stack_labeled_training_from_cache(
+            va_paths,
+            feature_cache_dir,
+            show_progress=False,
+            progress_desc="{} inner val".format(fold_label),
+            feature_dim=feature_dim,
+        )
+        if X_tr.shape[0] == 0 or X_va.shape[0] == 0:
+            for mk in mk_grid:
                 for ne in ne_grid:
                     grid_scores[(mk, ne)].append(0.0)
-                continue
+            continue
 
-            rs_mrmr = random_state + int(inner_train_i[0]) * 10007 + mk * 131
-            _picked, cols = kw_mrmr_select_columns(
-                X_tr, y_tr, all_names, mk, kw_p, rs_mrmr
-            )
+        # One KW+mRMR ranking per inner fold; reuse prefixes for all mk.
+        rs_rank = random_state + int(inner_train_i[0]) * 10007
+        ranked_names, ranked_cols = kw_mrmr_rank_columns(
+            X_tr, y_tr, all_names, kw_p, rs_rank
+        )
+        if not ranked_cols:
+            for mk in mk_grid:
+                for ne in ne_grid:
+                    grid_scores[(mk, ne)].append(0.0)
+            continue
+
+        for mk in mk_grid:
+            k_sub = min(int(mk), len(ranked_cols))
+            if k_sub < 1:
+                k_sub = min(10, len(ranked_cols))
+            cols = ranked_cols[:k_sub]
 
             for ne in ne_grid:
-                rs_rf = rs_mrmr + ne * 17
+                rs_rf = rs_rank + mk * 131 + ne * 17
                 rf = fit_rf_on_selected_columns(
                     X_tr, y_tr, cols, ne, rs_rf, rf_n_jobs
                 )
                 pred = predict_memar_rf(X_va, rf, cols)
                 grid_scores[(mk, ne)].append(_macro_f1_scored_epochs(y_va, pred))
 
-        if not quiet and show_progress:
+    if not quiet and show_progress:
+        for mk in mk_grid:
             for ne in ne_grid:
                 sc = grid_scores[(mk, ne)]
                 log.info(
@@ -152,6 +166,6 @@ def select_mrmr_n_estimators_subject_cv(
         "selected_mrmr_k": best_mk,
         "selected_n_estimators": best_ne,
         "best_mean_macro_f1": best_mean,
-        "internal_cv_note": "KW+mRMR once per (mrmr_k, inner_fold); RF refit per n_estimators only.",
+        "internal_cv_note": "KW+full mRMR ranking once per inner fold; reuse prefixes per mrmr_k and refit RF per n_estimators.",
     }
     return best_mk, best_ne, details
