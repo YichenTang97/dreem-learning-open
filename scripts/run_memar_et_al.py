@@ -11,7 +11,7 @@ and ``--n-estimators 100`` match the paper when not using ``--internal-cv-k``. W
 Run from repository root with the package on PYTHONPATH or installed::
 
     python scripts/run_memar_et_al.py --memmap-only
-    python scripts/run_memar_et_al.py --folds 0 --no-force --skip-memmap-build
+    python scripts/run_memar_et_al.py --folds 0 --skip-memmap-build
 
 Parallel folds: use ``--workers N`` to run multiple LOSO folds in parallel processes. With
 ``--all-eeg-channels``, each process holds a very large matrix (KW/mRMR/RF); many workers can
@@ -472,10 +472,10 @@ def main() -> None:
     )
     parser.add_argument("--skip-memmap-build", action="store_true")
     parser.add_argument(
-        "--no-force",
+        "--force",
         action="store_true",
-        help="Do not delete any existing outputs under the experiment save folder (including old fold runs). "
-        "If omitted, previous fold run folders are removed but memar_features_cache/ is kept for reuse.",
+        help="Delete previous fold run outputs under the experiment save folder before running "
+        "(memar_features_cache/ is still kept). Default: keep existing outputs (old --no-force behavior).",
     )
     parser.add_argument(
         "--mrmr-k",
@@ -535,7 +535,7 @@ def main() -> None:
         metavar="N",
         help="Number of parallel processes for LOSO folds (default: 1). High values with "
         "--all-eeg-channels can OOM: each worker loads the full training feature matrix. "
-        "Use --no-force when reusing outputs; combine with --skip-memmap-build so workers do not rewrite memmaps.",
+        "Default keeps existing outputs; combine with --skip-memmap-build so workers do not rewrite memmaps.",
     )
     parser.add_argument(
         "--rf-n-jobs",
@@ -623,7 +623,7 @@ def main() -> None:
         EXPERIMENTS_DIRECTORY, dataset, exp_name + ("_eeg" if use_eeg_experiment_dir else "")
     )
 
-    if os.path.exists(save_folder) and not args.no_force and not args.memmap_only:
+    if os.path.exists(save_folder) and args.force and not args.memmap_only:
         _clear_experiment_outputs_keep_feature_cache(save_folder)
 
     description_hash = memmap_hash(memmap_description)
