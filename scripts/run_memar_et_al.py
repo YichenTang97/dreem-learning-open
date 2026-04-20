@@ -468,7 +468,8 @@ def main() -> None:
         nargs="*",
         default=None,
         metavar="N",
-        help="LOSO fold indices (default: all).",
+        help="LOSO fold indices (default: all). Subjects are sorted by record folder name, then "
+        "shuffled with seed 2019 so the same index is the same held-out subject on every machine.",
     )
     parser.add_argument("--skip-memmap-build", action="store_true")
     parser.add_argument(
@@ -649,11 +650,14 @@ def main() -> None:
         print("memmap-only: ready at {!r}".format(dataset_dir))
         return
 
-    available_dreem_records = [
-        os.path.join(dataset_dir, record)
-        for record in os.listdir(dataset_dir)
-        if ".json" not in record
-    ]
+    available_dreem_records = sorted(
+        (
+            os.path.join(dataset_dir, record)
+            for record in os.listdir(dataset_dir)
+            if ".json" not in record
+        ),
+        key=lambda p: os.path.basename(os.path.normpath(p)).lower(),
+    )
     rd.seed(2019)
     rd.shuffle(available_dreem_records)
     if args.internal_cv_k >= 2:
