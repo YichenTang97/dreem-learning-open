@@ -79,6 +79,7 @@ from torch.optim import Adam
 from dreem_learning_open.models.modulo_net.net import ModuloNet
 from dreem_learning_open.datasets.dataset import DreemDataset
 from dreem_learning_open.utils.train_test_val_split import train_test_val_split
+from dreem_learning_open.utils.experiment_fold_index import loov_record_paths_in_fold_index_order
 from dreem_learning_open.utils.run_experiments import memmap_hash
 
 
@@ -566,14 +567,8 @@ def run_finetune(args: argparse.Namespace) -> None:
         print(f"ERROR: memmaps directory not found: {memmaps_dir}")
         sys.exit(1)
 
-    all_records = [
-        os.path.join(memmaps_dir, r)
-        for r in os.listdir(memmaps_dir)
-        if ".json" not in r
-    ]
-    random.seed(2019)
-    random.shuffle(all_records)
-    all_folds = [[r] for r in all_records]  # LOOCV
+    all_records = loov_record_paths_in_fold_index_order(memmaps_dir)
+    all_folds = [[r] for r in all_records]  # LOOCV (same fold_idx as pretraining / index_experiments)
 
     # Match fold directories → fold indices by test-record name
     fold_dir_to_idx = {}

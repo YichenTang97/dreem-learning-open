@@ -2,6 +2,9 @@
 LOOCV fold map and test-subject recovery for experiment runs (shared by
 ``scripts/experiment_utils/index_experiments.py`` and
 ``scripts/experiment_utils/cleanup_incomplete_experiments.py``).
+
+Fold index ↔ test subject is defined by :func:`loov_record_paths_in_fold_index_order`
+(sort subject folders by basename, then ``shuffle`` seed 2019) so it matches on all hosts.
 """
 from __future__ import annotations
 
@@ -9,7 +12,7 @@ import hashlib
 import json
 import os
 import random as rd
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from dreem_learning_open.utils.memmap_eeg import EEG_MODEL_SUFFIX, filter_memmap_signals_eeg_only
 
@@ -48,6 +51,30 @@ def load_memmap_description(base_experiments_dir: str, algo: str, dataset: str) 
     )
 
 
+def loov_record_paths_in_fold_index_order(dataset_dir: str) -> List[str]:
+    """
+    Full paths to memmap subject folders in fold-index order (``0`` = first test subject, …).
+
+    Subject folders are **sorted by basename** (case-insensitive) so ordering does not depend
+    on ``os.listdir`` / filesystem; then ``shuffle`` with seed ``2019``. Same permutation on
+    every OS and machine for the same set of folders.
+
+    Used by ``build_loov_fold_map`` / ``index_experiments``, Memar LOSO, and training scripts
+    so ``fold_idx`` always refers to the same held-out subject.
+    """
+    records = sorted(
+        (
+            os.path.join(dataset_dir, record_name)
+            for record_name in os.listdir(dataset_dir)
+            if ".json" not in record_name
+        ),
+        key=lambda p: os.path.basename(os.path.normpath(p)).lower(),
+    )
+    rd.seed(2019)
+    rd.shuffle(records)
+    return records
+
+
 def build_loov_fold_map(dataset_setting: dict, memmap_description: dict) -> Dict[str, int]:
     dataset_dir = os.path.join(
         dataset_setting["memmap_directory"], memmap_hash(memmap_description)
@@ -55,13 +82,7 @@ def build_loov_fold_map(dataset_setting: dict, memmap_description: dict) -> Dict
     if not os.path.isdir(dataset_dir):
         raise FileNotFoundError("Memmap directory does not exist: {!r}".format(dataset_dir))
 
-    records = [
-        os.path.join(dataset_dir, record_name)
-        for record_name in os.listdir(dataset_dir)
-        if ".json" not in record_name
-    ]
-    rd.seed(2019)
-    rd.shuffle(records)
+    records = loov_record_paths_in_fold_index_order(dataset_dir)
 
     return {os.path.basename(record): idx for idx, record in enumerate(records)}
 

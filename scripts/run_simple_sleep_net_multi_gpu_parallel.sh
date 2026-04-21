@@ -98,10 +98,10 @@ compute_state() {
 import hashlib
 import json
 import os
-import random as rd
 import shlex
 
 from dreem_learning_open.settings import DODH_SETTINGS, EXPERIMENTS_DIRECTORY
+from dreem_learning_open.utils.experiment_fold_index import loov_record_paths_in_fold_index_order
 
 
 def memmap_hash(memmap_description: dict) -> str:
@@ -151,14 +151,8 @@ if not memmap_ready:
     print("PENDING_FOLDS=''")
     raise SystemExit(0)
 
-records = [
-    os.path.join(dataset_dir, name)
-    for name in os.listdir(dataset_dir)
-    if ".json" not in name
-]
-rd.seed(2019)
-rd.shuffle(records)
-fold_count = len(records)  # dodh LOOV
+records = loov_record_paths_in_fold_index_order(dataset_dir)
+fold_count = len(records)  # dodh LOOV (portable fold indices)
 all_folds = list(range(fold_count))
 
 runs_root = os.path.join(EXPERIMENTS_DIRECTORY, "dodh", algo)

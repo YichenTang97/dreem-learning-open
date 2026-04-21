@@ -76,6 +76,7 @@ from dreem_learning_open.memar_et_al.internal_cv import select_mrmr_n_estimators
 from dreem_learning_open.memar_et_al.pipeline import fit_memar_rf_pipeline, predict_memar_rf
 from dreem_learning_open.preprocessings.h5_to_memmap import h5_to_memmaps
 from dreem_learning_open.settings import DODH_SETTINGS, EXPERIMENTS_DIRECTORY
+from dreem_learning_open.utils.experiment_fold_index import loov_record_paths_in_fold_index_order
 from dreem_learning_open.utils.memmap_eeg import filter_memmap_signals_eeg_only
 
 
@@ -468,8 +469,9 @@ def main() -> None:
         nargs="*",
         default=None,
         metavar="N",
-        help="LOSO fold indices (default: all). Subjects are sorted by record folder name, then "
-        "shuffled with seed 2019 so the same index is the same held-out subject on every machine.",
+        help="LOSO fold indices (default: all). Same convention as ``index_experiments`` "
+        "(``experiment_fold_index.loov_record_paths_in_fold_index_order``): sort subjects by folder "
+        "name, shuffle seed 2019 — portable across OS/PC.",
     )
     parser.add_argument("--skip-memmap-build", action="store_true")
     parser.add_argument(
@@ -650,16 +652,7 @@ def main() -> None:
         print("memmap-only: ready at {!r}".format(dataset_dir))
         return
 
-    available_dreem_records = sorted(
-        (
-            os.path.join(dataset_dir, record)
-            for record in os.listdir(dataset_dir)
-            if ".json" not in record
-        ),
-        key=lambda p: os.path.basename(os.path.normpath(p)).lower(),
-    )
-    rd.seed(2019)
-    rd.shuffle(available_dreem_records)
+    available_dreem_records = loov_record_paths_in_fold_index_order(dataset_dir)
     if args.internal_cv_k >= 2:
         n_train_subj = len(available_dreem_records) - 1
         if n_train_subj < args.internal_cv_k:

@@ -21,13 +21,13 @@ import argparse
 import hashlib
 import json
 import os
-import random as rd
 import subprocess
 import sys
 import threading
 from typing import List, Tuple
 
 from dreem_learning_open.settings import DODO_SETTINGS, DODH_SETTINGS, EXPERIMENTS_DIRECTORY
+from dreem_learning_open.utils.experiment_fold_index import loov_record_paths_in_fold_index_order
 from dreem_learning_open.utils.memmap_eeg import filter_memmap_signals_eeg_only, with_eeg_model_suffix
 
 ALGO_BASE = "cnn_rnn"
@@ -74,10 +74,7 @@ def memmap_ready(dataset_dir: str) -> bool:
 
 
 def compute_fold_count(dataset_dir: str) -> int:
-    records = [name for name in os.listdir(dataset_dir) if ".json" not in name]
-    rd.seed(2019)
-    rd.shuffle(records)
-    return len(records)
+    return len(loov_record_paths_in_fold_index_order(dataset_dir))
 
 
 def runs_root_for(dataset: str, out_dir: str | None, algo: str) -> str:

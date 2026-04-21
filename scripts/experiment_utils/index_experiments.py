@@ -10,7 +10,9 @@ Outputs (under data/experiments/dodh/simple_sleep_net by default):
 A run is ``completed`` only if ``description.json``, ``hypnograms.json``, and
 ``best_model.gz`` exist and ``performance_on_test_set``, ``performance_per_records``,
 and ``records_split`` are all non-null with non-empty content (LOOV: exactly one
-``test_records``). ``metadata.end`` is not required, so recovered or interrupted
+``test_records``). ``fold_idx`` uses the portable ordering from
+``experiment_fold_index.loov_record_paths_in_fold_index_order`` (sorted subject names,
+shuffle seed 2019). ``metadata.end`` is not required, so recovered or interrupted
 runs still count as pending for ``run_*_parallel`` until outputs exist.
 
 Usage:

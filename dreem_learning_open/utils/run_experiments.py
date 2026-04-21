@@ -5,6 +5,7 @@ import os
 import random as rd
 
 from dreem_learning_open.logger.logger import log_experiment
+from dreem_learning_open.utils.experiment_fold_index import loov_record_paths_in_fold_index_order
 from dreem_learning_open.utils.memmap_eeg import filter_memmap_signals_eeg_only
 from dreem_learning_open.preprocessings.h5_to_memmap import h5_to_memmaps
 from dreem_learning_open.utils.indexed_run_complete import check_indexed_run_complete
@@ -167,13 +168,8 @@ def run_experiments(experiments, experiments_directory, output_directory, datase
                 temporal_context = dataset_parameter['temporal_context']
                 temporal_context_mode = dataset_parameter['temporal_context_mode']
 
-                available_dreem_records = [
-                    os.path.join(dataset_dir, record) for record in
-                    os.listdir(dataset_dir) if '.json' not in record
-                ]
-                # build the folds
-                rd.seed(2019)
-                rd.shuffle(available_dreem_records)
+                # Portable LOOV fold order (matches index_experiments / Memar).
+                available_dreem_records = loov_record_paths_in_fold_index_order(dataset_dir)
 
                 if dataset in ['dodo', 'mass_multi_channel', 'mass']:
                     if dataset == 'dodo':

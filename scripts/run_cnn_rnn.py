@@ -46,6 +46,7 @@ from sol_experiments.sol_config import (
     print_config,
 )
 from dreem_learning_open.logger.logger import log_experiment
+from dreem_learning_open.utils.experiment_fold_index import loov_record_paths_in_fold_index_order
 from dreem_learning_open.preprocessings.h5_to_memmap import h5_to_memmaps
 from dreem_learning_open.utils.train_test_val_split import train_test_val_split
 from dreem_learning_open.utils.memmap_eeg import filter_memmap_signals_eeg_only, with_eeg_model_suffix
@@ -166,15 +167,9 @@ def build_memmaps_and_folds(
             f"Memmap directory is unusable after build: {memmaps_dir!r}"
         )
 
-    # Same construction order as dreem_learning_open.utils.run_experiments.run_experiments
-    memmap_records = [
-        os.path.join(memmaps_dir, r)
-        for r in os.listdir(memmaps_dir)
-        if ".json" not in r
-    ]
+    # Same construction order as run_experiments / index_experiments (portable fold indices).
+    memmap_records = loov_record_paths_in_fold_index_order(memmaps_dir)
     print(f"  {len(memmap_records)} memmap records ready.")
-    random.seed(2019)
-    random.shuffle(memmap_records)
     folds = [[r] for r in memmap_records]   # LOOCV: one held-out per fold
     return memmap_records, folds
 
